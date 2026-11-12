@@ -90,7 +90,7 @@ const permissionsAdapter = {
         {
           id: scriptId,
           matches: [originPattern(origin)],
-          js: ['content/reader.js'],
+          js: ['content/reader-loader.js'],
           persistAcrossSessions: true,
           runAt: 'document_idle'
         }
@@ -117,6 +117,45 @@ const http = createFetchHttpAdapter();
 const settingsService = createSettingsService({ storage, permissions: permissionsAdapter });
 const clueStore = createClueStore({ storage });
 const aiClient = createAiClient({ http, getSettings: () => settingsService.getSettings() });
+
+// 扩展重载/启动后，把已授权站点的 reader 脚本重新注册到最新的注入文件上
+async function reregisterGrantedReaders() {
+  try {
+    const settings = await settingsService.getSettings();
+    const sites = settings && Array.isArray(settings.gameSites) ? settings.gameSites : [];
+    const origins = new Set();
+    for (const site of sites) {
+      if (site == null) continue;
+      const raw = typeof site === 'string' ? site : site.origin || site.url;
+      const origin = resolveOrigin(raw);
+      if (origin) origins.add(origin);
+    }
+    for (const origin of origins) {
+      try {
+        const granted = await permissionsAdapter.containsOrigin(origin);
+        if (granted) {
+          await permissionsAdapter.registerReader(origin);
+        }
+      } catch (err) {
+        // 单个站点重注册失败忽略
+      }
+    }
+  } catch (err) {
+    // 重注册整体失败忽略
+  }
+}
+
+if (typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
+  chrome.runtime.onInstalled.addListener(() => {
+    reregisterGrantedReaders();
+  });
+}
+
+if (typeof chrome !== 'undefined' && chrome.runtime?.onStartup) {
+  chrome.runtime.onStartup.addListener(() => {
+    reregisterGrantedReaders();
+  });
+}
 
 if (typeof chrome !== 'undefined' && chrome?.sidePanel && typeof chrome.sidePanel.setPanelBehavior === 'function') {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => {});

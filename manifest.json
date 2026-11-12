@@ -13,6 +13,12 @@
     "http://*/*",
     "https://*/*"
   ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/reader.js", "core/messages.js"],
+      "matches": ["http://*/*", "https://*/*"]
+    }
+  ],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"

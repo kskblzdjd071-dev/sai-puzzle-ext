@@ -533,3 +533,20 @@ if (!isListenerRegistered && typeof chrome !== 'undefined' && chrome.runtime && 
     // 监听注册保护
   }
 }
+
+// 内容脚本环境自启动：先用默认配置启动，再让首次批量冲刷上报页面初始可见文本
+if (
+  typeof document !== 'undefined' &&
+  typeof window !== 'undefined' &&
+  typeof chrome !== 'undefined' &&
+  chrome.runtime &&
+  chrome.runtime.id
+) {
+  try {
+    startReader({});
+    previousText = '';
+    isDomDirty = true;
+  } catch {
+    // 自启动保护
+  }
+}
