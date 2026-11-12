@@ -106,7 +106,7 @@ export const geminiAdapter = {
       return false;
     }
     const m = model.trim().toLowerCase().replace(/^models\//, '');
-    return /^(?:gemini-1\.5-pro|gemini-1\.5-flash|gemini-2\.0-flash)(?:-\d[\w-]*)?$/.test(m);
+    return /^(?:gemini-1\.5-pro|gemini-1\.5-flash|gemini-2\.0-flash)(?:-(?:\d{4}-\d{2}-\d{2}|\d+))?$/.test(m);
   },
 
   async complete({ http, apiKey, baseUrl, model, messages }) {

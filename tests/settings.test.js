@@ -142,7 +142,7 @@ test('addGameSite 与 removeGameSite 动态权限与注销校验', async () => {
 
   // 3. 移除 game-1，同源仍有 game-2，不应注销 origin
   await service.removeGameSite('https://game.example.com', 'game-1');
-  assert.equal(calls.unregisterReader.length, 0);
+  assert.equal(calls.unregisteredReaders.length, 0);
   assert.equal(calls.removedOrigins.length, 0);
 
   // 4. 移除最后一个同源站点 game-2，调用注销与移除
