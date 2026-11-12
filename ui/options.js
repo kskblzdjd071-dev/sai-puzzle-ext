@@ -242,6 +242,31 @@ providerSelect.addEventListener('change', () => {
 });
 
 /**
+ * 计算供应商所需 Host 权限匹配模式（与 core/settings.js 的 requestProviderHostPermission 保持一致）
+ * @param {string} provider
+ * @param {string} baseUrl
+ * @returns {string}
+ */
+function getProviderHostPattern(provider, baseUrl) {
+  if (provider === 'openai_compatible') {
+    if (baseUrl) {
+      return `${normalizeOrigin(baseUrl)}/*`;
+    }
+    return 'https://api.openai.com/*';
+  }
+
+  if (provider === 'deepseek') {
+    return 'https://api.deepseek.com/*';
+  }
+
+  if (provider === 'gemini') {
+    return 'https://generativelanguage.googleapis.com/*';
+  }
+
+  return '';
+}
+
+/**
  * 保存设置提交
  */
 settingsForm.addEventListener('submit', async (e) => {
@@ -256,13 +281,38 @@ settingsForm.addEventListener('submit', async (e) => {
     return;
   }
 
+  let hostPattern = '';
+  try {
+    hostPattern = getProviderHostPattern(provider, baseUrl);
+  } catch (err) {
+    showStatus('无效的 Base URL 格式，请输入正确的网址', 'error');
+    return;
+  }
+
+  // 权限申请必须在用户手势的同步执行路径中发起（经后台转发会丢失用户手势），
+  // 因此先同步拿到 Promise，再 await 结果；异常或拒绝都视为未授权。
+  let permissionGranted = false;
+  if (typeof chrome !== 'undefined' && chrome?.permissions?.request) {
+    let permissionPromise;
+    try {
+      permissionPromise = chrome.permissions.request({ origins: [hostPattern] });
+    } catch (err) {
+      permissionPromise = Promise.resolve(false);
+    }
+    try {
+      permissionGranted = Boolean(await permissionPromise);
+    } catch (err) {
+      permissionGranted = false;
+    }
+  }
+
   try {
     const permReqPayload = { provider };
     if (provider === 'openai_compatible' && baseUrl) {
       permReqPayload.baseUrl = baseUrl;
     }
     const permResult = await sendRuntimeMessage(createMessage(PROVIDER_PERMISSION_REQUEST, permReqPayload));
-    if (!permResult || !permResult.granted) {
+    if (!permissionGranted || !permResult || !permResult.granted) {
       showStatus('AI 服务商网络访问权限未获得授权，可能导致无法连接', 'warning');
     }
 
@@ -308,6 +358,22 @@ addSiteForm.addEventListener('submit', async (e) => {
   } catch (err) {
     showStatus('无效的 URL 格式，请输入正确的网址', 'error');
     return;
+  }
+
+  // 权限申请必须在用户手势的同步执行路径中发起（经后台转发会丢失用户手势）：
+  // 先同步拿到 Promise，再 await 结果；异常或拒绝都视为未授权，不中止添加流程。
+  if (typeof chrome !== 'undefined' && chrome?.permissions?.request) {
+    let permissionPromise;
+    try {
+      permissionPromise = chrome.permissions.request({ origins: [`${normalizedOrigin}/*`] });
+    } catch (err) {
+      permissionPromise = Promise.resolve(false);
+    }
+    try {
+      await permissionPromise;
+    } catch (err) {
+      // 申请异常视为未授权，仍继续发送 SITES_ADD
+    }
   }
 
   try {

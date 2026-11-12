@@ -26,7 +26,7 @@
    - `core/ai.js`、`core/clues.js`、`core/settings.js`（纯逻辑部分）严禁直接调用任何 `chrome.*` API。存储、网络和特权权限操作必须通过构造工厂注入的 Port / Adapter 接口完成。
 3. **权限最小化与动态注入**：
    - 严禁在 `manifest.json` 的 `permissions` 中声明 `<all_urls>`。禁止声明静态 `host_permissions`。
-   - 游戏域名必须使用 `optional_host_permissions`。用户在设置中添加站点时，方可触发 `chrome.permissions.request`，授权成功后使用 `chrome.scripting.registerContentScripts` 动态注册 Content Script；移除站点时注销脚本并释放权限。
+   - 游戏域名必须使用 `optional_host_permissions`。用户在设置中添加站点时，由设置页在用户点击处理函数中同步调用 `chrome.permissions.request`，后台只用 `chrome.permissions.contains` 检查；授权成功后使用 `chrome.scripting.registerContentScripts` 动态注册 Content Script；移除站点时注销脚本并释放权限。
    - 各 AI 服务商域名（如 `api.openai.com`）必须在用户切换或保存供应商时，按需申请 Optional Host 权限。
 4. **读取与截图节流策略**：
    - 页面文本使用 `MutationObserver` 采集，必须经过 5000ms 窗口合并，计算字符级增量（Delta），仅把新增文本发给 AI。
@@ -279,7 +279,7 @@ export interface ExtensionResponse<T = any> {
 | `ACTIVE_TAB_INFO` | Panel → Background | `{}` | 响应 `{ origin: string, gameId?: string, isGranted: boolean, isCanvas: boolean, title: string }`。由 Background 查询当前高亮 Tab 状态。 |
 | `SETTINGS_GET` | UI → Background | `{}` | 响应脱敏设置：`RedactedSettings`。绝不把明文 API Key 传给 UI。 |
 | `SETTINGS_SAVE` | Options → Background | `Partial<Settings>` | 保存全局设置。若包含明文 `apiKey`，Background 写入 storage 但严禁将该 payload 打印到日志。成功返回 `RedactedSettings`。 |
-| `SITES_ADD` | Options → Background | `{ origin: string, gameId?: string }` | 动态申请 Host 权限并注册 Reader 脚本。响应 `{ site: GameSite, granted: boolean }`。 |
+| `SITES_ADD` | Options → Background | `{ origin: string, gameId?: string }` | 设置页在用户点击处理函数中同步申请 Host 权限，后台只用 `chrome.permissions.contains` 检查并注册 Reader 脚本。响应 `{ site: GameSite, granted: boolean }`。 |
 | `SITES_REMOVE` | Options → Background | `{ origin: string, gameId?: string }` | 注销 Reader 脚本，若该 Origin 下无其他游戏，调用 Permissions API 回收权限。响应 `{ ok: true }`。 |
 | `PROVIDER_PERMISSION_REQUEST` | Options → Background | `{ provider: ProviderId, baseUrl?: string }` | 申请对应 AI 服务商域名的可选网络权限。响应 `{ granted: boolean }`。 |
 | `CLUES_LIST` | Panel → Background | `{ gameKey: string }` | 读取指定游戏的全部线索。响应 `Clue[]`。 |
@@ -317,11 +317,14 @@ export interface ExtensionResponse<T = any> {
 [调用 normalizeOrigin(url)，提取规范 Origin]
          │
          ▼
+[Options 页在点击处理函数中同步调用 chrome.permissions.request]
+         │
+         ▼
 [向 Background 发送 SITES_ADD 消息]
          │
          ▼
-[Background 调用 permissions.requestOrigin(origin)] ──(用户在系统弹窗拒绝)──► 返回 granted: false
-         │ (用户同意授权)                                                   保持站点在列表，标注未授权
+[Background 用 permissions.contains 检查] ──(未获得授权)──► 返回 granted: false
+         │ (已获得授权)                                                 保持站点在列表，标注未授权
          ▼
 [Background 调用 scripting.registerReader(origin)]
  注册动态 Content Script (仅针对此 origin)
@@ -345,7 +348,7 @@ export interface ExtensionResponse<T = any> {
 - `deepseek`：固定申请 `https://api.deepseek.com/*`。
 - `gemini`：固定申请 `https://generativelanguage.googleapis.com/*`。
 
-切换供应商或更新 Base URL 时，后台先调用 `chrome.permissions.request({ origins: [...] })`，成功后再行持久化。
+切换供应商或更新 Base URL 时，由设置页在用户点击处理函数中同步调用 `chrome.permissions.request({ origins: [...] })`，后台只用 `chrome.permissions.contains` 检查，确认后再行持久化。
 
 ---
 

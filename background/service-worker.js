@@ -35,10 +35,11 @@ function originPattern(origin) {
 }
 
 const permissionsAdapter = {
+  // 权限已由设置页在用户点击时申请，后台仅检查
   async requestOrigin(origin) {
-    if (typeof chrome === 'undefined' || !chrome?.permissions?.request) return false;
+    if (typeof chrome === 'undefined' || !chrome?.permissions?.contains) return false;
     try {
-      return await chrome.permissions.request({ origins: [originPattern(origin)] });
+      return await chrome.permissions.contains({ origins: [originPattern(origin)] });
     } catch (err) {
       return false;
     }
@@ -59,8 +60,9 @@ const permissionsAdapter = {
       return false;
     }
   },
+  // 权限已由设置页在用户点击时申请，后台仅检查
   async requestHost(origins) {
-    if (typeof chrome === 'undefined' || !chrome?.permissions?.request) return false;
+    if (typeof chrome === 'undefined' || !chrome?.permissions?.contains) return false;
     const list = Array.isArray(origins) ? origins : [];
     const patterns = [];
     for (const item of list) {
@@ -70,7 +72,7 @@ const permissionsAdapter = {
     }
     if (!patterns.length) return false;
     try {
-      return await chrome.permissions.request({ origins: patterns });
+      return await chrome.permissions.contains({ origins: patterns });
     } catch (err) {
       return false;
     }
