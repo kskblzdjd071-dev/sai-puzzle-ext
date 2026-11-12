@@ -167,7 +167,7 @@ export function mountPanel(root, port) {
 
       const content = document.createElement('div');
       content.className = 'clue-content';
-      content.textContent = clue.content || '';
+      content.textContent = clue.text || '';
       item.appendChild(content);
 
       if (Array.isArray(clue.tags) && clue.tags.length > 0) {
