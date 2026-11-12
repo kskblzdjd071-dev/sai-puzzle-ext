@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!-- 职责：扩展设置与游戏站点授权管理页面 -->
+<!-- 作者：Allen -->
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>解谜线索整理 - 设置</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <header class="header">
+      <h1>解谜线索整理 · 设置</h1>
+      <p class="subtitle">配置大语言模型接口与授权游戏站点</p>
+    </header>
+
+    <div id="status-bar" class="status-bar hidden" role="status" aria-live="polite"></div>
+
+    <section class="card">
+      <h2>模型供应商配置</h2>
+      <form id="settings-form" novalidate>
+        <div class="form-group">
+          <label for="provider-select">模型供应商</label>
+          <select id="provider-select">
+            <option value="openai_compatible">OpenAI 兼容</option>
+            <option value="deepseek">DeepSeek</option>
+            <option value="gemini">Gemini</option>
+          </select>
+        </div>
+
+        <div id="deepseek-notice" class="notice-box hidden">
+          当前 DeepSeek 通用模型不支持截图解谜分析，仅支持纯文本分析；若需识图请改选 OpenAI (如 gpt-4o) 或 Gemini 系列。
+        </div>
+
+        <div id="base-url-group" class="form-group">
+          <label for="base-url-input">接口 Base URL</label>
+          <input type="url" id="base-url-input" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false">
+          <span class="hint">OpenAI 兼容模式的基础地址，需包含协议与版本路径</span>
+        </div>
+
+        <div class="form-group">
+          <label for="model-input">模型名称 (Model)</label>
+          <input type="text" id="model-input" placeholder="gpt-4o" autocomplete="off" spellcheck="false" required>
+        </div>
+
+        <div class="form-group">
+          <label for="api-key-input">API 密钥 (API Key)</label>
+          <input type="password" id="api-key-input" autocomplete="off" spellcheck="false">
+          <span class="hint">密钥仅保存在本地存储中，不会在界面与日志中明文展示</span>
+        </div>
+
+        <div class="form-actions">
+          <button type="submit" id="save-settings-btn" class="btn btn-primary">保存设置</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>游戏站点授权管理</h2>
+      <p class="section-desc">只有在此处添加并授权的站点，扩展才会注入线索提取辅助脚本。移除站点将自动收回访问权限。</p>
+
+      <form id="add-site-form" class="site-add-form" novalidate>
+        <div class="form-inline-group">
+          <div class="field-item flex-2">
+            <label for="site-url-input">站点 URL / 域名</label>
+            <input type="text" id="site-url-input" placeholder="https://puzzle.example.com" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field-item flex-1">
+            <label for="site-gameid-input">游戏 ID (可选)</label>
+            <input type="text" id="site-gameid-input" placeholder="game-01" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="field-action">
+            <button type="submit" id="add-site-btn" class="btn btn-secondary">添加站点</button>
+          </div>
+        </div>
+      </form>
+
+      <div class="table-container">
+        <table class="sites-table">
+          <thead>
+            <tr>
+              <th>站点 Origin</th>
+              <th>游戏 ID</th>
+              <th>授权状态</th>
+              <th>启用状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="sites-tbody">
+            <tr class="empty-row">
+              <td colspan="5">暂未添加任何游戏站点</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

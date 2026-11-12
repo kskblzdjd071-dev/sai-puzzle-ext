@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "网页游戏解谜整理插件",
+  "version": "0.1.0",
+  "description": "专为网页解谜与逃脱游戏设计的线索自动捕获与智能答疑助手。",
+  "permissions": [
+    "storage",
+    "sidePanel",
+    "scripting",
+    "tabs"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "ui/panel.html"
+  },
+  "options_ui": {
+    "page": "ui/options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "打开解谜整理侧边栏"
+  }
+}
