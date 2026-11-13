@@ -285,48 +285,64 @@ function extractLocalNumericSlots(text, prevSlots = null) {
     }
   }
 
-  // 若提供了 prevSlots，进行上下文对齐，防止顶部行滚动删除时 occ 序号整体平移
+  // 若提供了 prevSlots，进行分阶段上下文对齐，防止滚动删除/插入时 occ 序号平移误抢旧 key
   if (prevSlots && prevSlots.length > 0) {
     const usedPrevKeys = new Set();
+
+    // 阶段 1：先对所有槽位做「完整句子 + 句内槽位」对齐并继承旧 key
     for (const nSlot of slots) {
-      // 1. 优先对齐完全一致的句子
-      let matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
+      const matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
         p.sentence === nSlot.sentence &&
         p.slotIndexInSentence === nSlot.slotIndexInSentence);
-
-      // 2. 骨架相同且前后邻句之一相同的局部对齐
-      if (!matchP) {
-        matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
-          p.sentenceSkeleton === nSlot.sentenceSkeleton &&
-          p.slotIndexInSentence === nSlot.slotIndexInSentence &&
-          ((p.prevSent && p.prevSent === nSlot.prevSent) || (p.nextSent && p.nextSent === nSlot.nextSent)));
-      }
-
-      // 3. 单句或同骨架出现次数相同的稳定对齐
-      if (!matchP) {
-        const prevCount = prevSlots.filter(p => p.sentenceSkeleton === nSlot.sentenceSkeleton).length;
-        const nextCount = slots.filter(s => s.sentenceSkeleton === nSlot.sentenceSkeleton).length;
-        if (prevCount === nextCount) {
-          matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
-            p.sentenceSkeleton === nSlot.sentenceSkeleton &&
-            p.slotIndexInSentence === nSlot.slotIndexInSentence &&
-            p.occurrenceIndex === nSlot.occurrenceIndex);
-        }
-      }
-
       if (matchP) {
         nSlot.key = matchP.key;
         nSlot.alignedFromPrev = true;
         usedPrevKeys.add(matchP.key);
-      } else {
-        const prevKeySet = new Set(prevSlots.map(p => p.key));
-        let seq = 0;
-        let candidateKey;
-        do {
-          candidateKey = `${nSlot.sentenceSkeleton}:::new_${++seq}:::slot_${nSlot.slotIndexInSentence}`;
-        } while (prevKeySet.has(candidateKey));
-        nSlot.key = candidateKey;
       }
+    }
+
+    // 阶段 2：对尚未对齐的槽位做骨架 + 前后邻句对齐
+    for (const nSlot of slots) {
+      if (nSlot.alignedFromPrev) continue;
+      const matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
+        p.sentenceSkeleton === nSlot.sentenceSkeleton &&
+        p.slotIndexInSentence === nSlot.slotIndexInSentence &&
+        ((p.prevSent && p.prevSent === nSlot.prevSent) || (p.nextSent && p.nextSent === nSlot.nextSent)));
+      if (matchP) {
+        nSlot.key = matchP.key;
+        nSlot.alignedFromPrev = true;
+        usedPrevKeys.add(matchP.key);
+      }
+    }
+
+    // 阶段 3：单句或同骨架出现次数相同的稳定对齐（不得抢占当前页仍存活的旧句子 key）
+    for (const nSlot of slots) {
+      if (nSlot.alignedFromPrev) continue;
+      const prevCount = prevSlots.filter(p => p.sentenceSkeleton === nSlot.sentenceSkeleton).length;
+      const nextCount = slots.filter(s => s.sentenceSkeleton === nSlot.sentenceSkeleton).length;
+      if (prevCount === nextCount) {
+        const matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
+          p.sentenceSkeleton === nSlot.sentenceSkeleton &&
+          p.slotIndexInSentence === nSlot.slotIndexInSentence &&
+          p.occurrenceIndex === nSlot.occurrenceIndex);
+        if (matchP) {
+          nSlot.key = matchP.key;
+          nSlot.alignedFromPrev = true;
+          usedPrevKeys.add(matchP.key);
+        }
+      }
+    }
+
+    // 阶段 4：未对齐的新槽位分配唯一 new key
+    const prevKeySet = new Set(prevSlots.map(p => p.key));
+    let seq = 0;
+    for (const nSlot of slots) {
+      if (nSlot.alignedFromPrev) continue;
+      let candidateKey;
+      do {
+        candidateKey = `${nSlot.sentenceSkeleton}:::new_${++seq}:::slot_${nSlot.slotIndexInSentence}`;
+      } while (prevKeySet.has(candidateKey));
+      nSlot.key = candidateKey;
     }
   }
 
