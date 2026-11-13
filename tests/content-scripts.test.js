@@ -89,14 +89,15 @@ test('reader-loader.js 通过动态 import 加载 reader 模块', () => {
   );
 });
 
-test('manifest 的 web_accessible_resources 覆盖 reader 及其静态依赖，且声明 use_dynamic_url', () => {
+test('manifest 的 web_accessible_resources 覆盖 reader 及其静态依赖，且不得开启 use_dynamic_url', () => {
   const manifest = JSON.parse(readSource('manifest.json'));
   const entries = Array.isArray(manifest.web_accessible_resources) ? manifest.web_accessible_resources : [];
   assert.ok(entries.length >= 1, 'manifest 应声明 web_accessible_resources');
 
   const resources = new Set();
   for (const entry of entries) {
-    assert.equal(entry.use_dynamic_url, true, 'web_accessible_resources 条目应开启 use_dynamic_url');
+    // use_dynamic_url 为 true 时，getURL 会返回动态 UUID，而 reader.js 内的相对导入会落到真实扩展 ID 或 chrome-extension://invalid/ 导致模块加载失败
+    assert.notEqual(entry.use_dynamic_url, true, 'web_accessible_resources 条目不得开启 use_dynamic_url');
     const list = entry && Array.isArray(entry.resources) ? entry.resources : [];
     for (const item of list) resources.add(item);
     const matches = entry && Array.isArray(entry.matches) ? entry.matches : [];
