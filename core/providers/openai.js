@@ -90,7 +90,7 @@ export const openaiAdapter = {
       return false;
     }
     const m = model.trim().toLowerCase();
-    return /^(?:gpt-4o-mini|gpt-4o|gpt-4-turbo)(?:-(?:\d{4}-\d{2}-\d{2}|\d+))?$/.test(m);
+    return /^(?:gpt-4o-mini|gpt-4o|gpt-4-turbo|gemini-3\.8-flash)(?:-(?:\d{4}-\d{2}-\d{2}|\d+|tiered))?$/.test(m);
   },
 
   async complete({ http, apiKey, baseUrl, model, messages }) {

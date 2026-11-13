@@ -81,6 +81,9 @@ test('supportsVision 精确匹配正例与反例', () => {
   assert.equal(openaiAdapter.supportsVision('gpt-4-turbo'), true);
   assert.equal(openaiAdapter.supportsVision('gpt-4-turbo-2024-04-09'), true);
   assert.equal(openaiAdapter.supportsVision('gpt-4o-001'), true);
+  assert.equal(openaiAdapter.supportsVision('gemini-3.8-flash'), true);
+  assert.equal(openaiAdapter.supportsVision('GEMINI-3.8-FLASH'), true);
+  assert.equal(openaiAdapter.supportsVision('x-deepseek-v4.1-flash'), false);
 
   assert.equal(openaiAdapter.supportsVision('gpt-4'), false);
   assert.equal(openaiAdapter.supportsVision('gpt-3.5-turbo'), false);
@@ -99,6 +102,9 @@ test('supportsVision 精确匹配正例与反例', () => {
   assert.equal(geminiAdapter.supportsVision('gemini-1.5-pro'), true);
   assert.equal(geminiAdapter.supportsVision('gemini-1.5-flash'), true);
   assert.equal(geminiAdapter.supportsVision('gemini-2.0-flash'), true);
+  assert.equal(geminiAdapter.supportsVision('gemini-3.8-flash'), true);
+  assert.equal(geminiAdapter.supportsVision('GEMINI-3.8-FLASH'), true);
+  assert.equal(geminiAdapter.supportsVision('models/gemini-3.8-flash'), true);
   assert.equal(geminiAdapter.supportsVision('gemini-1.5-flash-001'), true);
   assert.equal(geminiAdapter.supportsVision('models/gemini-1.5-pro'), true);
 
@@ -189,6 +195,60 @@ test('视觉拒绝：非视觉模型带图像时抛出精确中文错误，且�
   );
 
   assert.equal(callCount, 0);
+});
+
+test('canvas/截图路径：openai_compatible 下 x-deepseek-v4.1-flash 带图时改走 gemini-3.8-flash', async () => {
+  const captured = [];
+  const http = createMockHttpAdapter(async (url, init) => {
+    const parsedBody = JSON.parse(init.body);
+    captured.push({ url, body: parsedBody });
+    const content = JSON.stringify([
+      { text: '格子上有数字 1', tags: ['棋盘'] }
+    ]);
+    const payload = {
+      model: parsedBody.model,
+      choices: [
+        {
+          index: 0,
+          message: { role: 'assistant', content },
+          finish_reason: 'stop'
+        }
+      ],
+      usage: { prompt_tokens: 30, completion_tokens: 15, total_tokens: 45 }
+    };
+    return {
+      status: 200,
+      text: JSON.stringify(payload),
+      json: payload
+    };
+  });
+
+  const client = createAiClient({
+    http,
+    getSettings: async () =>
+      createMockSettings({
+        provider: 'openai_compatible',
+        model: 'x-deepseek-v4.1-flash',
+        baseUrl: 'https://ly.77625.xyz/v1'
+      })
+  });
+
+  const imageResult = await client.extractClues({
+    delta: '当前画面有数字',
+    image: { mimeType: 'image/png', dataBase64: 'ZmFrZWltYWdl' }
+  });
+
+  assert.equal(captured[0].body.model, 'gemini-3.8-flash');
+  assert.equal(imageResult.model, 'gemini-3.8-flash');
+  const userMessageContent = captured[0].body.messages.find((m) => m.role === 'user').content;
+  assert.ok(Array.isArray(userMessageContent));
+  assert.ok(userMessageContent.some((item) => item.type === 'image_url'));
+  assert.ok(imageResult.clues.length >= 1);
+  assert.equal(imageResult.clues[0].text, '格子上有数字 1');
+
+  const textResult = await client.extractClues('房间有一扇门', null);
+  assert.equal(captured[1].body.model, 'x-deepseek-v4.1-flash');
+  assert.equal(textResult.model, 'x-deepseek-v4.1-flash');
 });
 
 test('OpenAI 适配器：extractClues 与 answerQuestion 完整闭环、解包与 camelCase usage 归一化', async () => {

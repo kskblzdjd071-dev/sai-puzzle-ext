@@ -406,10 +406,10 @@ export interface ExtensionResponse<T = any> {
   - `assertNoSecretInText(text: string, apiKey: string): void`：若 `apiKey` 长度大于 5 且被发现包含在 `text`（包括 Prompt、消息体、生成的摘要中）的任何位置，立刻阻断并抛出 `new Error('严重安全违规：文本中侦测到 API Key 泄漏风险')`。
 - **模型视觉能力规范**：
   - 供应商抽象中 `supportsVision(model: string): boolean`：
-    - OpenAI：`gpt-4o`、`gpt-4o-mini`、`gpt-4-turbo` 返回 `true`；其他返回 `false`。
+    - OpenAI：`gpt-4o`、`gpt-4o-mini`、`gpt-4-turbo`、`gemini-3.8-flash` 返回 `true`；其他返回 `false`。
     - DeepSeek：当前所有默认模型一律返回 `false`。
-    - Gemini：`gemini-1.5-pro`、`gemini-1.5-flash`、`gemini-2.0-flash` 返回 `true`。
-  - 若调用包含 `image` 参数但 `supportsVision` 为 `false`，AI 模块必须主动中断并抛出中文异常：`new Error('当前选用的 AI 模型不支持图像识别，请在设置中更换为支持视觉的模型（如 gpt-4o 或 gemini-1.5-flash）')`。
+    - Gemini：`gemini-1.5-pro`、`gemini-1.5-flash`、`gemini-2.0-flash`、`gemini-3.8-flash` 返回 `true`。
+  - 若调用包含 `image` 参数且当前选用模型为无视觉的 DeepSeek 时（如 `openai_compatible` 网关下的 `x-deepseek-v4.1-flash`），截图/canvas 路径自动改用已批准的识图模型 `gemini-3.8-flash`；纯文本请求仍保持选中的模型。若无可用识图模型，AI 模块必须主动中断并抛出中文异常：`new Error('当前选用的 AI 模型不支持图像识别，请在设置中更换为支持视觉的模型（如 gpt-4o 或 gemini-1.5-flash）')`。
 - **Prompt 组装规范**：
   - `buildExtractPrompt(delta: string, hasImage: boolean)`：
     - System: `"你是一位专业的解谜游戏助手。请从用户提供的网页游戏最新文本增量或画面中，提炼出具有解谜价值的关键线索、密码、物品、位置信息。必须以 JSON 数组格式输出，字段格式：[{\"text\":\"线索简述\",\"tags\":[\"标签\"]}]。若无新线索，返回空数组 []。不要输出任何 Markdown 代码围栏之外的多余解释。"`

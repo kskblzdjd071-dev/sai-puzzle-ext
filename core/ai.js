@@ -242,12 +242,24 @@ export function createAiClient({ http, getSettings, now = Date.now }) {
 
       const settings = await getSettings();
       const provider = selectProvider(settings);
-      const model = settings.model || provider.defaultModel;
+      let model = settings.model || provider.defaultModel;
 
       if (hasImage && !provider.supportsVision(model)) {
-        throw new Error(
-          '当前选用的 AI 模型不支持图像识别，请在设置中更换为支持视觉的模型（如 gpt-4o 或 gemini-1.5-flash）'
-        );
+        const rawModel = (settings.model || '').toLowerCase();
+        const isDeepSeek =
+          settings.provider === 'deepseek' ||
+          rawModel.includes('deepseek') ||
+          rawModel === 'x-deepseek-v4.1-flash';
+
+        if (settings.provider === 'openai_compatible' && isDeepSeek) {
+          model = 'gemini-3.8-flash';
+        } else if (settings.provider === 'gemini') {
+          model = 'gemini-3.8-flash';
+        } else {
+          throw new Error(
+            '当前选用的 AI 模型不支持图像识别，请在设置中更换为支持视觉的模型（如 gpt-4o 或 gemini-1.5-flash）'
+          );
+        }
       }
 
       const prompts = buildExtractPrompt(deltaText || '', hasImage);
