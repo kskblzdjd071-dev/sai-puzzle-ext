@@ -393,3 +393,20 @@ test('createClueStore 配置短密钥时不把短串替换为 *** 保留正文',
   const mdStr = await store.exportMarkdown(gameKey);
   assert.ok(mdStr.includes('shortkey'));
 });
+
+test('addClues 写入 model 字段且 listClues 正确读取', async () => {
+  const store = createClueStore({ storage: createMemoryStorageAdapter() });
+  const gameKey = 'https://game.example.com/play';
+
+  await store.addClues(gameKey, [
+    { text: '视觉线索', tags: ['密码'], source: 'screenshot', model: 'gemini-3.8-flash' },
+    { text: '纯文本线索', tags: ['提示'], source: 'text' }
+  ]);
+
+  const list = await store.listClues(gameKey);
+  assert.equal(list.length, 2);
+  const visual = list.find((c) => c.text === '视觉线索');
+  const plain = list.find((c) => c.text === '纯文本线索');
+  assert.equal(visual.model, 'gemini-3.8-flash');
+  assert.equal(plain.model, undefined);
+});

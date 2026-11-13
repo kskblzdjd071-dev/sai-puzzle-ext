@@ -138,6 +138,7 @@ export interface Clue {
   createdAt: number;       // 捕获时间戳（毫秒）
   tags?: string[];         // 语义标签，例如 ["密码", "门禁", "道具"]
   imageRef?: string;       // 截图元数据引用（不存大图 Base64，仅存快照哈希或预留标识）
+  model?: string;          // 提取时实际生效的模型 ID
 }
 
 // 游戏完整归档实体

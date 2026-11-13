@@ -245,10 +245,58 @@ test('canvas/截图路径：openai_compatible 下 x-deepseek-v4.1-flash 带图�
   assert.ok(userMessageContent.some((item) => item.type === 'image_url'));
   assert.ok(imageResult.clues.length >= 1);
   assert.equal(imageResult.clues[0].text, '格子上有数字 1');
+  assert.equal(imageResult.clues[0].model, 'gemini-3.8-flash');
 
   const textResult = await client.extractClues('房间有一扇门', null);
   assert.equal(captured[1].body.model, 'x-deepseek-v4.1-flash');
   assert.equal(textResult.model, 'x-deepseek-v4.1-flash');
+});
+
+test('openai_compatible 带图 extractClues 遇 502 重试并最终成功，且请求超时设为 60000', async () => {
+  const captured = [];
+  let callCount = 0;
+  const successJson = {
+    choices: [
+      {
+        message: {
+          content: JSON.stringify([{ text: '画面中的线索' }])
+        }
+      }
+    ]
+  };
+
+  const http = createMockHttpAdapter(async (url, init) => {
+    captured.push({ url, init });
+    callCount++;
+    if (callCount === 1) {
+      return {
+        status: 502,
+        text: 'Bad Gateway',
+        json: { error: { message: 'Bad Gateway' } }
+      };
+    }
+    return {
+      status: 200,
+      text: JSON.stringify(successJson),
+      json: successJson
+    };
+  });
+
+  const client = createAiClient({
+    http,
+    getSettings: async () => createMockSettings({ provider: 'openai_compatible', model: 'gemini-3.8-flash' })
+  });
+
+  const res = await client.extractClues({
+    delta: '当前画面有数字',
+    image: { mimeType: 'image/png', dataBase64: 'ZmFrZWltYWdl' }
+  });
+
+  assert.equal(captured.length, 2);
+  assert.ok(res.clues.length >= 1);
+  assert.equal(res.clues[0].text, '画面中的线索');
+  assert.equal(captured[0].init.timeoutMs, 60000);
+  assert.equal(captured[1].init.timeoutMs, 60000);
 });
 
 test('OpenAI 适配器：extractClues 与 answerQuestion 完整闭环、解包与 camelCase usage 归一化', async () => {

@@ -31,6 +31,52 @@ const DEFAULT_SCREENSHOT_INTERVAL_MS = 30000;
 const EMPTY_TAB_INFO = { origin: '', isGranted: false, isCanvas: false, title: '' };
 
 /**
+ * 分类并脱敏视觉提取失败的错误信息。
+ * @param {Error|object|string} err 错误对象或信息
+ * @param {string} [apiKey=''] 需要脱敏的密钥
+ * @returns {string} 结构化错误描述
+ */
+export function classifyVisionError(err, apiKey = '') {
+  let raw = '';
+  if (err && typeof err === 'object' && typeof err.message === 'string') {
+    raw = err.message;
+  } else if (typeof err === 'string') {
+    raw = err;
+  }
+
+  if (apiKey && typeof apiKey === 'string' && apiKey.trim().length > 0) {
+    raw = raw.replaceAll(apiKey.trim(), '***');
+  }
+
+  if (!raw.trim()) {
+    return '图像识别失败，请稍后再试';
+  }
+
+  if (raw.includes('不支持图像识别')) {
+    return `识图门禁: ${raw}`;
+  }
+
+  if (
+    raw.includes('502') ||
+    raw.includes('429') ||
+    raw.includes('接口调用失败') ||
+    raw.includes('接口错误')
+  ) {
+    return `识图接口失败: ${raw}`;
+  }
+
+  if (
+    raw.includes('网络请求异常') ||
+    raw.toLowerCase().includes('timeout') ||
+    raw.includes('超时')
+  ) {
+    return `识图网络异常: ${raw}`;
+  }
+
+  return `识图异常: ${raw}`;
+}
+
+/**
  * 创建消息路由实例。
  * @param {object} deps 依赖集合（settingsService / clueStore / aiClient 必填）
  * @returns {{ handleMessage: (message: object, sender: object) => Promise<object> }}
@@ -89,8 +135,11 @@ export function createMessageRouter(deps) {
   async function maybeStoreExtracted(gameKey, extractResult) {
     try {
       if (!gameKey || !extractResult) return [];
-      const clues = Array.isArray(extractResult.clues) ? extractResult.clues : [];
+      let clues = Array.isArray(extractResult.clues) ? extractResult.clues : [];
       if (clues.length === 0) return [];
+      if (extractResult.model) {
+        clues = clues.map((c) => (c.model ? c : { ...c, model: extractResult.model }));
+      }
       const added = await clueStore.addClues(gameKey, clues);
       const addedList = Array.isArray(added) ? added : [];
       if (addedList.length > 0) {
@@ -506,8 +555,9 @@ export function createMessageRouter(deps) {
             if (extractResult && Array.isArray(extractResult.clues) && extractResult.clues.length > 0) {
               await maybeStoreExtracted(gameKey, extractResult);
             }
-          } catch (_) {
-            return screenshotResult(false, reason, { error: '图像识别失败，请稍后再试' });
+          } catch (err) {
+            const classifiedError = classifyVisionError(err, apiKey);
+            return screenshotResult(false, reason, { error: classifiedError });
           }
 
           screenshotThrottleMap.set(throttleKey, now());

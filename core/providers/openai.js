@@ -105,14 +105,49 @@ export const openaiAdapter = {
       temperature: 0.2
     };
 
-    const res = await http.request(url, {
+    const hasImageContent = messages.some((m) => {
+      if (m && m.image) {
+        return true;
+      }
+      if (Array.isArray(m.content)) {
+        return m.content.some((part) => part && part.type === 'image_url');
+      }
+      return false;
+    });
+
+    const requestOptions = {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey.trim()}`
       },
       body: JSON.stringify(reqBody)
-    });
+    };
+    if (hasImageContent) {
+      requestOptions.timeoutMs = 60000;
+    }
+
+    async function executeRequest() {
+      return await http.request(url, requestOptions);
+    }
+
+    let res;
+    try {
+      res = await executeRequest();
+    } catch (reqErr) {
+      const em = String(reqErr && reqErr.message ? reqErr.message : reqErr);
+      if (em.includes('502') || em.includes('429')) {
+        await new Promise((r) => setTimeout(r, 100));
+        res = await executeRequest();
+      } else {
+        throw reqErr;
+      }
+    }
+
+    if (res.status === 502 || res.status === 429) {
+      await new Promise((r) => setTimeout(r, 100));
+      res = await executeRequest();
+    }
 
     if (res.status < 200 || res.status >= 300) {
       let errMsg = `OpenAI 接口调用失败 (HTTP ${res.status})`;

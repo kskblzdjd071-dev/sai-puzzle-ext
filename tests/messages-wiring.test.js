@@ -4,7 +4,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createMessageRouter } from '../background/message-router.js';
+import { createMessageRouter, classifyVisionError } from '../background/message-router.js';
 import {
   createMessage,
   PING,
@@ -397,6 +397,161 @@ test('READER_SCREENSHOT_REQUEST 在 payload 无图且 canvas 采集也没有，c
   assert.ok(resultBroadcast);
   assert.equal(resultBroadcast.payload.ok, false);
   assert.match(resultBroadcast.payload.error, /网页截图失败/);
+});
+
+test('classifyVisionError 正确分类各类识图错误并脱敏 API Key', () => {
+  const gateErr = new Error('当前选用的 AI 模型不支持图像识别，请在设置中更换为支持视觉的模型（如 gpt-4o 或 gemini-1.5-flash）');
+  assert.match(classifyVisionError(gateErr), /^识图门禁:/);
+
+  const httpErr = new Error('OpenAI 接口调用失败 (HTTP 502)');
+  const classifiedHttp = classifyVisionError(httpErr);
+  assert.match(classifiedHttp, /^识图接口失败:/);
+  assert.match(classifiedHttp, /502/);
+  assert.doesNotMatch(classifiedHttp, /^识图门禁:/);
+
+  const netErr = new Error('网络请求异常，请检查网络连接');
+  assert.match(classifyVisionError(netErr), /^识图网络异常:/);
+
+  const otherErr = new Error('some other reason');
+  assert.match(classifyVisionError(otherErr), /some other reason/);
+
+  const secretKey = 'sk-TESTONLY_not_a_real_key_xxxx9999';
+  const leakErr = new Error(`调用失败: key=${secretKey}`);
+  const sanitized = classifyVisionError(leakErr, secretKey);
+  assert.ok(sanitized.includes('***'));
+  assert.ok(!sanitized.includes(secretKey));
+});
+
+test('READER_SCREENSHOT_REQUEST extractClues 抛出门禁错误时返回分类错误', async () => {
+  const { router } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        throw new Error('当前选用的 AI 模型不支持图像识别，请在设置中更换为支持视觉的模型（如 gpt-4o 或 gemini-1.5-flash）');
+      }
+    }
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE' }
+  }));
+
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, false);
+  assert.match(res.payload.error, /^识图门禁:/);
+});
+
+test('READER_SCREENSHOT_REQUEST extractClues 抛出 HTTP 502 时返回分类错误', async () => {
+  const { router } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        throw new Error('OpenAI 接口调用失败 (HTTP 502)');
+      }
+    }
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE' }
+  }));
+
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, false);
+  assert.match(res.payload.error, /^识图接口失败:/);
+  assert.match(res.payload.error, /502/);
+});
+
+test('READER_SCREENSHOT_REQUEST extractClues 抛出网络请求异常时返回分类错误', async () => {
+  const { router } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        throw new Error('网络请求异常，请检查网络连接');
+      }
+    }
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE' }
+  }));
+
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, false);
+  assert.match(res.payload.error, /^识图网络异常:/);
+});
+
+test('READER_SCREENSHOT_REQUEST extractClues 抛出其他错误时返回包含原因的错误', async () => {
+  const { router } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        throw new Error('some other reason');
+      }
+    }
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE' }
+  }));
+
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, false);
+  assert.match(res.payload.error, /some other reason/);
+});
+
+test('READER_SCREENSHOT_REQUEST 第一次成功入库并带有模型标签，第二次失败复现分类错误', async () => {
+  let nowMs = 1_700_000_000_000;
+  let callCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        callCount++;
+        if (callCount === 1) {
+          return { clues: [{ text: '格子 1-2-3-4', source: 'screenshot' }], model: 'gemini-3.8-flash' };
+        }
+        throw new Error('OpenAI 接口调用失败 (HTTP 502)');
+      }
+    }
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, true);
+
+  const games = await clueStore.listGames();
+  assert.ok(games.length > 0);
+  const clues = await clueStore.listClues(games[0].gameKey);
+  assert.ok(clues.length > 0);
+  assert.equal(clues[0].model, 'gemini-3.8-flash');
+
+  nowMs += 31_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.match(res2.payload.error, /^识图接口失败:/);
 });
 
 test('service-worker 源码将 queryIsCanvas 与 captureCanvas 传给了 createMessageRouter', async () => {

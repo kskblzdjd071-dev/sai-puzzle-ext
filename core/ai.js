@@ -294,6 +294,7 @@ export function createAiClient({ http, getSettings, now = Date.now }) {
       }
 
       const source = hasImage && !hasDelta ? 'screenshot' : 'text';
+      const resolvedModel = res.model || model;
       const clues = rawClues
         .filter((c) => c && typeof c.text === 'string' && c.text.trim().length > 0)
         .map((c) => ({
@@ -301,13 +302,14 @@ export function createAiClient({ http, getSettings, now = Date.now }) {
           tags: Array.isArray(c.tags)
             ? c.tags.map((t) => String(t).trim()).filter(Boolean)
             : [],
-          source: c.source === 'screenshot' || c.source === 'text' ? c.source : source
+          source: c.source === 'screenshot' || c.source === 'text' ? c.source : source,
+          model: resolvedModel
         }));
 
       return {
         clues,
         rawSummary: res.text,
-        model: res.model || model,
+        model: resolvedModel,
         usage: normalizeUsage(res.usage)
       };
     },

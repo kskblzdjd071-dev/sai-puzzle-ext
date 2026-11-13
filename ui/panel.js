@@ -162,6 +162,12 @@ export function mountPanel(root, port) {
       timeSpan.textContent = formatTime(clue.createdAt);
 
       meta.appendChild(badge);
+      if (clue.model && typeof clue.model === 'string') {
+        const modelTag = document.createElement('span');
+        modelTag.className = 'model-tag';
+        modelTag.textContent = clue.model;
+        meta.appendChild(modelTag);
+      }
       meta.appendChild(timeSpan);
       item.appendChild(meta);
 

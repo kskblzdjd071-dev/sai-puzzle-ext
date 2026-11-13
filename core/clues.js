@@ -174,6 +174,10 @@ export function createClueStore({ storage, now = Date.now, id, getApiKey }) {
         }
         existingMap.add(key);
 
+        const modelStr = typeof item.model === 'string' && item.model.trim().length > 0
+          ? sanitizeSecretText(item.model.trim(), currentApiKey)
+          : undefined;
+
         const newClue = {
           id: nextId(),
           gameKey,
@@ -183,7 +187,8 @@ export function createClueStore({ storage, now = Date.now, id, getApiKey }) {
           tags: Array.isArray(item.tags)
             ? item.tags.map((t) => sanitizeSecretText(String(t).trim(), currentApiKey)).filter(Boolean)
             : [],
-          imageRef: item.imageRef || undefined
+          imageRef: item.imageRef || undefined,
+          ...(modelStr ? { model: modelStr } : {})
         };
         newlyAdded.push(newClue);
         record.clues.push(newClue);
