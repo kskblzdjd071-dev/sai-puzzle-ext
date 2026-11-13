@@ -200,3 +200,54 @@ test('边界情况与异常校验：空参数、空数组、空库导出及 Mark
   const cleared = await timeStore.getGame(gameKey);
   assert.equal(cleared, null);
 });
+
+test('addQa 按 gameKey 持久化问答并在 exportJSON 与 exportMarkdown 中体现', async () => {
+  const storage = createMemoryStorageAdapter();
+  let time = 5000;
+  const store = createClueStore({ storage, now: () => time });
+  const gameKey = 'https://game.example.com::room-1';
+
+  // 空 question / 空 answer 跳过不入库
+  const skipped1 = await store.addQa(gameKey, { question: '', answer: '有答案' });
+  assert.equal(skipped1, null);
+  const skipped2 = await store.addQa(gameKey, { question: '有提问', answer: '   ' });
+  assert.equal(skipped2, null);
+
+  const entry = await store.addQa(gameKey, {
+    question: '密码怎么算？',
+    answer: '提示是 4312',
+    summary: '抽屉线索',
+    suggestions: ['检查台灯'],
+    model: 'gpt-4o'
+  });
+  assert.ok(entry);
+  assert.equal(entry.question, '密码怎么算？');
+  assert.equal(entry.answer, '提示是 4312');
+
+  const list = await store.listQa(gameKey);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].question, '密码怎么算？');
+  assert.equal(list[0].answer, '提示是 4312');
+  assert.equal(list[0].createdAt, 5000);
+
+  const game = await store.getGame(gameKey);
+  assert.ok(game);
+  assert.equal(Array.isArray(game.qa), true);
+  assert.equal(game.qa.length, 1);
+  assert.equal(game.clues.length, 0);
+
+  // 无线索但有问答时的导出
+  const json = await store.exportJSON(gameKey);
+  const parsed = JSON.parse(json);
+  assert.equal(parsed.games.length, 1);
+  assert.equal(parsed.games[0].qa.length, 1);
+  assert.equal(parsed.games[0].qa[0].question, '密码怎么算？');
+  assert.equal(parsed.games[0].clues.length, 0);
+  assert.equal(/apiKey|baseUrl/i.test(json), false);
+
+  const md = await store.exportMarkdown(gameKey);
+  assert.ok(md.includes('### 问答记录'));
+  assert.ok(md.includes('密码怎么算？'));
+  assert.ok(md.includes('提示是 4312'));
+  assert.equal(/apiKey|baseUrl/i.test(md), false);
+});

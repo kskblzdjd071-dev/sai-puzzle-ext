@@ -49,6 +49,7 @@ export function createMessageRouter(deps) {
     sendToTab,
     broadcast,
     queryIsCanvas,
+    injectReadersIntoOpenTabs,
   } = deps || {};
 
   function respond(type, requestId, apiKey, payload) {
@@ -290,6 +291,31 @@ export function createMessageRouter(deps) {
             payload.question,
             Array.isArray(clues) ? clues : []
           );
+          if (gameKey && result && clueStore && typeof clueStore.addQa === 'function') {
+            try {
+              let safeQuestion = payload.question;
+              let safeAnswer = result.answer;
+              let safeSummary = result.summary;
+              let safeSuggestions = result.suggestions;
+              if (apiKey && typeof apiKey === 'string') {
+                safeQuestion = safeQuestion ? String(safeQuestion).replaceAll(apiKey, '***') : safeQuestion;
+                safeAnswer = safeAnswer ? String(safeAnswer).replaceAll(apiKey, '***') : safeAnswer;
+                safeSummary = safeSummary ? String(safeSummary).replaceAll(apiKey, '***') : safeSummary;
+                if (Array.isArray(safeSuggestions)) {
+                  safeSuggestions = safeSuggestions.map((s) => String(s).replaceAll(apiKey, '***'));
+                }
+              }
+              await clueStore.addQa(gameKey, {
+                question: safeQuestion,
+                answer: safeAnswer,
+                summary: safeSummary,
+                suggestions: safeSuggestions,
+                model: result.model
+              });
+            } catch (_) {
+              /* 问答持久化失败不影响答疑结果响应 */
+            }
+          }
           return respond(type, requestId, apiKey, result);
         }
 
@@ -319,9 +345,17 @@ export function createMessageRouter(deps) {
             return respond(type, requestId, apiKey, { queued: true });
           }
 
-          const gameKey = typeof payload.gameKey === 'string' && payload.gameKey
-            ? payload.gameKey
-            : makeGameKey(origin);
+          let gameKey = typeof payload.gameKey === 'string' && payload.gameKey ? payload.gameKey : '';
+          if (!gameKey) {
+            let settings = null;
+            try {
+              settings = await settingsService.getSettings();
+            } catch (_) {
+              settings = null;
+            }
+            const gameId = resolveGameId(settings, origin);
+            gameKey = makeGameKey(origin, gameId);
+          }
 
           try {
             const extractResult = await aiClient.extractClues(text, null);
@@ -424,9 +458,17 @@ export function createMessageRouter(deps) {
           const mimeType = matched[1];
           const dataBase64 = matched[2];
 
-          const gameKey = typeof payload.gameKey === 'string' && payload.gameKey
-            ? payload.gameKey
-            : makeGameKey(origin);
+          let gameKey = typeof payload.gameKey === 'string' && payload.gameKey ? payload.gameKey : '';
+          if (!gameKey) {
+            let settings = null;
+            try {
+              settings = await settingsService.getSettings();
+            } catch (_) {
+              settings = null;
+            }
+            const gameId = resolveGameId(settings, origin);
+            gameKey = makeGameKey(origin, gameId);
+          }
 
           try {
             const extractResult = await aiClient.extractClues('', { mimeType, dataBase64 });
@@ -480,6 +522,13 @@ export function createMessageRouter(deps) {
         }
 
         case PANEL_READY: {
+          if (typeof injectReadersIntoOpenTabs === 'function') {
+            try {
+              await injectReadersIntoOpenTabs();
+            } catch (_) {
+              /* 注入失败不阻断侧栏加载 */
+            }
+          }
           const tabInfo = await getActiveTabInfo();
           let clues = [];
           if (tabInfo.origin) {

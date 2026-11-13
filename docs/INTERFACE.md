@@ -87,7 +87,7 @@ tests/
 | **Settings** | Allen | `core/settings.js`<br>`ui/options.*` | `DEFAULT_SETTINGS: Settings`<br>`redactSecret(value: string): string`<br>`normalizeOrigin(urlOrOrigin: string): string`<br>`createSettingsService({ storage, permissions }): SettingsService` | 管理供应商配置、模型选择、站点授权列表；驱动 Options 页面安全交互；隔离 Key 的明文展示。 |
 | **Reader** | Look | `content/reader.js` | `collectVisibleText(doc?: Document): string`<br>`computeDelta(prev: string, next: string): string`<br>`shouldCaptureCanvas(doc?: Document): boolean`<br>`startReader(config: ReaderConfig): void`<br>`stopReader(): void`<br>`flushBatch(): void`<br>`requestScreenshot(reason: 'user' \| 'visual_change'): void` | 动态运行在已授权网页中；提取可见文本，5秒合并增量；侦测 Canvas 并计算低分辨率像素散列；受控触发截图请求；绝不碰触 API Key。 |
 | **AI** | Apple | `core/ai.js`<br>`core/providers/*` | `assertNoSecretInText(text: string, apiKey: string): void`<br>`buildExtractPrompt(delta: string, hasImage: boolean): { system: string, user: string }`<br>`buildAnswerPrompt(question: string, clues: Clue[]): { system: string, user: string }`<br>`selectProvider(settings: Settings): ProviderAdapter`<br>`createAiClient({ http, getSettings, now? }): AiClient` | 构造提取与回答提示词；分发多供应商请求；适配视觉能力；提供发送前密钥阻断断言；统一错误为友好中文。 |
-| **Clues** | Peter | `core/clues.js` | `makeGameKey(origin: string, gameId?: string): string`<br>`parseGameKey(gameKey: string): { origin: string, gameId?: string }`<br>`dedupeKey(clue: { text: string }): string`<br>`createClueStore({ storage, now?, id? }): ClueStore` | 线索持久化、归一化去重（文本小写/空格压缩）；维护游戏元信息索引；提供无 Key 泄漏的 JSON/Markdown 导出。 |
+| **Clues** | Peter | `core/clues.js` | `makeGameKey(origin: string, gameId?: string): string`<br>`parseGameKey(gameKey: string): { origin: string, gameId?: string }`<br>`dedupeKey(clue: { text: string }): string`<br>`createClueStore({ storage, now?, id? }): ClueStore` | 线索与问答持久化（addQa/listQa）、归一化去重（文本小写/空格压缩）；维护游戏元信息索引；提供含问答、无 Key 泄漏的 JSON/Markdown 导出。 |
 | **Panel** | Tom | `ui/panel.html`<br>`ui/panel.js`<br>`ui/panel.css` | `mountPanel(root: HTMLElement, port: PanelPort): void`<br>`unmountPanel(root: HTMLElement): void` | 独立侧栏 UI，展示当前活跃游戏线索时间线；支持问答交互、状态提示、手动刷新与导出；完全解耦 SidePanel 原生 API。 |
 | **Hub** | 全体/架构 | `background/service-worker.js` | 内部事件监听与服务总线 | 响应消息总线；调用 `chrome.permissions` 与 `chrome.scripting`；调度标签页截图；双重节流保护；协同各模块执行。 |
 
@@ -140,6 +140,18 @@ export interface Clue {
   imageRef?: string;       // 截图元数据引用（不存大图 Base64，仅存快照哈希或预留标识）
 }
 
+// 问答记录实体
+export interface QaEntry {
+  id: string;              // 问答主键
+  gameKey: string;         // 归属游戏复合主键
+  question: string;        // 提问文本（脱敏）
+  answer: string;          // 回答正文（脱敏）
+  summary?: string;        // 线索总结（可选）
+  suggestions?: string[];  // 下一步建议（可选）
+  model?: string;          // 模型标识（可选）
+  createdAt: number;       // 问答时间戳
+}
+
 // 游戏完整归档实体
 export interface GameRecord {
   gameKey: string;         // 游戏唯一复合主键
@@ -147,6 +159,7 @@ export interface GameRecord {
   gameId?: string;         // 子游戏标识符
   title?: string;          // 游戏呈现名称
   clues: Clue[];           // 线索集合（按时间升序）
+  qa?: QaEntry[];          // 问答记录集合（按时间升序）
   createdAt: number;       // 初次建档时间戳
   updatedAt: number;       // 最近更新时间戳
 }
@@ -274,17 +287,17 @@ export interface ExtensionResponse<T = any> {
 | 常量名称 (`type`) | 消息流向 | Payload 规范 | 响应内容与处理职责 |
 | :--- | :--- | :--- | :--- |
 | `PING` | Any → Background | `{ timestamp: number }` | 响应 `{ ok: true, pong: number }`。用于心跳与通道可用性检测。 |
-| `PANEL_READY` | Panel → Background | `{}` | 侧栏初始化完成，触发 Background 返回当前活跃标签页状态与当前站点线索。 |
+| `PANEL_READY` | Panel → Background | `{}` | 侧栏初始化完成，触发 Background 对所有已打开且已授权标签页补注入 Reader Loader，并返回当前活跃标签页状态与当前站点线索。 |
 | `OPTIONS_READY` | Options → Background | `{}` | 设置页初始化完成，触发权限同步与设置加载。 |
 | `ACTIVE_TAB_INFO` | Panel → Background | `{}` | 响应 `{ origin: string, gameId?: string, isGranted: boolean, isCanvas: boolean, title: string }`。由 Background 查询当前高亮 Tab 状态。 |
 | `SETTINGS_GET` | UI → Background | `{}` | 响应脱敏设置：`RedactedSettings`。绝不把明文 API Key 传给 UI。 |
 | `SETTINGS_SAVE` | Options → Background | `Partial<Settings>` | 保存全局设置。若包含明文 `apiKey`，Background 写入 storage 但严禁将该 payload 打印到日志。成功返回 `RedactedSettings`。 |
-| `SITES_ADD` | Options → Background | `{ origin: string, gameId?: string }` | 设置页在用户点击处理函数中同步申请 Host 权限，后台只用 `chrome.permissions.contains` 检查并注册 Reader 脚本。响应 `{ site: GameSite, granted: boolean }`。 |
+| `SITES_ADD` | Options → Background | `{ origin: string, gameId?: string }` | 设置页在用户点击处理函数中同步申请 Host 权限，后台只用 `chrome.permissions.contains` 检查并注册 Reader 脚本，并自动向该 Origin 下已打开标签页注入 Reader Loader。响应 `{ site: GameSite, granted: boolean }`。 |
 | `SITES_REMOVE` | Options → Background | `{ origin: string, gameId?: string }` | 注销 Reader 脚本，若该 Origin 下无其他游戏，调用 Permissions API 回收权限。响应 `{ ok: true }`。 |
 | `PROVIDER_PERMISSION_REQUEST` | Options → Background | `{ provider: ProviderId, baseUrl?: string }` | 申请对应 AI 服务商域名的可选网络权限。响应 `{ granted: boolean }`。 |
 | `CLUES_LIST` | Panel → Background | `{ gameKey: string }` | 读取指定游戏的全部线索。响应 `Clue[]`。 |
 | `CLUES_LIST_GAMES` | Panel/Options → Background | `{}` | 获取游戏归档列表。响应 `GameRecord[]`（可剥离大字段）。 |
-| `CLUES_EXPORT` | Panel → Background | `{ gameKey: string \| null, format: 'json' \| 'markdown' }` | 导出指定或全部游戏的排版线索。响应 `{ content: string, filename: string }`。 |
+| `CLUES_EXPORT` | Panel → Background | `{ gameKey: string \| null, format: 'json' \| 'markdown' }` | 导出指定或全部游戏的排版线索与问答历史（含 JSON / Markdown）。绝不包含 API Key / BaseUrl 等敏感字段。响应 `{ content: string, filename: string }`。 |
 | `CLUES_UPDATED` | Background → Panel (广播) | `{ gameKey: string, addedCount: number }` | 当 AI 提取新线索成功并写入存储后广播，Panel 据此自动重新拉取线索流。 |
 | `READER_CONFIG` | Background → Content | `{ batchIntervalMs: number, screenshotMaxIntervalMs: number, gameKey: string, enabled: boolean }` | 下发给 Content Script 的工作参数。 |
 | `READER_DELTA` | Content → Background | `{ origin: string, gameKey?: string, text: string, title?: string }` | 页面文本合并增量上报。Background 接收后交由 `aiClient.extractClues` 处理，产生新线索自动存入 Store。 |
@@ -292,7 +305,7 @@ export interface ExtensionResponse<T = any> {
 | `READER_SCREENSHOT_REQUEST` | Content/Panel → Background | `{ origin: string, gameKey?: string, reason: 'user' \| 'visual_change', tabId?: number }` | 请求 Background 对当前标签页执行截屏。Background 校验节流，执行 `captureVisibleTab`，转送 AI。 |
 | `READER_SCREENSHOT_RESULT` | Background → Content/Panel | `{ ok: boolean, reason: string, skipped?: 'throttled' \| 'no_tab' \| 'permission', error?: string }` | 截屏调度反馈结果。 |
 | `AI_EXTRACT` | Background (内部) / Panel | `{ gameKey: string, delta?: string, image?: { mimeType: string, dataBase64: string } }` | 触发单次线索抽取。响应 `ExtractCluesResult`。 |
-| `AI_ASK` | Panel → Background | `{ gameKey: string, question: string }` | 用户提交提问。Background 调取该游戏全部线索，送入 `aiClient.answerQuestion`，响应 `AnswerQuestionResult`。 |
+| `AI_ASK` | Panel → Background | `{ gameKey: string, question: string }` | 用户提交提问。Background 调取该游戏全部线索，送入 `aiClient.answerQuestion`，成功后持久化问答至该游戏归档（进行明文 Key 过滤），响应 `AnswerQuestionResult`。 |
 
 ---
 
@@ -331,6 +344,9 @@ export interface ExtensionResponse<T = any> {
          │
          ▼
 [将站点信息 { origin, granted: true, enabled: true } 存入 Settings]
+         │
+         ▼
+[向已打开且符合权限的标签页 executeScript 注入 content/reader-loader.js]
          │
          ▼
 [后续用户在 Options 点击移除站点]
@@ -411,9 +427,11 @@ export interface ExtensionResponse<T = any> {
 - **去重算法**：
   - `dedupeKey(clue: { text: string }): string`：执行规范化——去除首尾空白字符、内部连续空白合并为单空格、英文字符全部转为小写。对规范化结果计算轻量哈希或直接作为键。
   - 在向存储写入 `addClues` 时，拉取当前游戏已有线索池，命中相同 `dedupeKey` 的线索直接剔除，仅入库并返回新增线索。
+- **问答存储与归档**：
+  - `addQa(gameKey, entry)` 与 `listQa(gameKey)`：记录并拉取 AI 问答历史（至少包含 question/answer/createdAt，可选 summary/suggestions/model/id）。空 question 或空 answer 不入库。
 - **导出规格**：
-  - `exportJSON(gameKey)`：导出标准 JSON 字符串，顶层包含元信息（导出时间戳、插件版本、游戏列表、线索详情）。输出前必须进行深度遍历，若发现任何键名为 `apiKey`、`baseUrl` 的字段，强制抛出异常阻断导出。
-  - `exportMarkdown(gameKey)`：生成包含 `# 游戏线索归档`、按时间线倒序排版、带标签徽章的清爽 Markdown 文档。
+  - `exportJSON(gameKey)`：导出标准 JSON 字符串，顶层包含元信息（导出时间戳、插件版本、游戏列表、线索详情与 qa 问答数组）。输出前必须进行深度遍历，若发现任何键名为 `apiKey`、`baseUrl` 的字段，强制抛出异常阻断导出。
+  - `exportMarkdown(gameKey)`：生成包含 `# 游戏线索归档`、按时间线倒序排版、带标签徽章的清爽 Markdown 文档；若存在问答记录，在线索之后追加 `### 问答记录` 区域展示问答对。
 
 ### 9.5 Panel 模块 (`ui/panel.js`)
 - **挂载抽象**：
@@ -435,6 +453,7 @@ export interface ExtensionResponse<T = any> {
 - **唯一中心枢纽职责**：
   - 作为唯一监听 `chrome.runtime.onMessage` 的后端服务。
   - 持有单例 `SettingsService`、`AiClient`、`ClueStore` 实例。
+  - 在安装/启动（`reregisterGrantedReaders`）、新站点授权（`permissions.registerReader`）、侧栏初始化（`PANEL_READY`）三个时机，自动使用 `chrome.scripting.executeScript` 向已打开且已授权的标签页补注入 `content/reader-loader.js`。
 - **双重截取节流器**：
   - 维护内存映射表 `screenshotThrottleMap: Map<string, number>`，键为 `${tabId}::${origin}`。
   - 无论 Content Script 何时触发，Background 校验当前时间戳与上次成功截图时间戳差值。若小于 30000ms，直接拦截并回复 `{ ok: false, skipped: 'throttled' }`。

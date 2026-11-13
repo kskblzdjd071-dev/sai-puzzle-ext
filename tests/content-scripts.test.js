@@ -106,6 +106,19 @@ test('manifest 的 web_accessible_resources 覆盖 reader 及其静态依赖', (
   for (const item of needed) {
     assert.ok(resources.has(item), `web_accessible_resources 应包含 ${item}`);
   }
+
+  const readerEntry = entries.find((e) => e && Array.isArray(e.resources) && e.resources.includes('content/reader.js'));
+  assert.ok(readerEntry, '应找到包含 content/reader.js 的 web_accessible_resources 项');
+  assert.equal(readerEntry.use_dynamic_url, true, 'web_accessible_resources 应声明 use_dynamic_url: true');
+});
+
+test('service-worker.js 包含向已打开标签页注入 reader-loader 的逻辑', () => {
+  const source = readSource('background/service-worker.js');
+  assert.ok(source.includes('chrome.scripting.executeScript'), '后台应调用 chrome.scripting.executeScript');
+  assert.ok(
+    source.includes("'content/reader-loader.js'") || source.includes('"content/reader-loader.js"'),
+    '注入的文件应为 content/reader-loader.js'
+  );
 });
 
 test('manifest 的 content_scripts 声明的脚本不含顶层静态 import/export', () => {

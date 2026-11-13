@@ -69,7 +69,8 @@ export function createClueStore({ storage, now = Date.now, id }) {
     }
     return {
       ...raw,
-      clues: Array.isArray(raw.clues) ? raw.clues : []
+      clues: Array.isArray(raw.clues) ? raw.clues : [],
+      qa: Array.isArray(raw.qa) ? raw.qa : []
     };
   }
 
@@ -99,6 +100,7 @@ export function createClueStore({ storage, now = Date.now, id }) {
           gameId: parsed.gameId,
           title: parsed.origin,
           clues: [],
+          qa: [],
           createdAt: now(),
           updatedAt: now()
         };
@@ -150,6 +152,70 @@ export function createClueStore({ storage, now = Date.now, id }) {
         return [];
       }
       const sorted = [...record.clues].sort((a, b) => a.createdAt - b.createdAt);
+      return structuredClone(sorted);
+    },
+
+    async addQa(gameKey, entry) {
+      if (!gameKey) {
+        throw new Error('gameKey 不能为空');
+      }
+      if (!entry || typeof entry !== 'object') {
+        return null;
+      }
+      const question = typeof entry.question === 'string' ? entry.question.trim() : '';
+      const answer = typeof entry.answer === 'string' ? entry.answer.trim() : '';
+      if (!question || !answer) {
+        return null;
+      }
+
+      let record = await readRecord(gameKey);
+      if (!record) {
+        const parsed = parseGameKey(gameKey);
+        record = {
+          gameKey,
+          origin: parsed.origin,
+          gameId: parsed.gameId,
+          title: parsed.origin,
+          clues: [],
+          qa: [],
+          createdAt: now(),
+          updatedAt: now()
+        };
+      }
+
+      const item = {
+        id: entry.id || nextId(),
+        gameKey,
+        question,
+        answer,
+        createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : now()
+      };
+      if (typeof entry.summary === 'string' && entry.summary.trim()) {
+        item.summary = entry.summary.trim();
+      }
+      if (Array.isArray(entry.suggestions)) {
+        item.suggestions = entry.suggestions.map((s) => String(s).trim()).filter(Boolean);
+      }
+      if (typeof entry.model === 'string' && entry.model.trim()) {
+        item.model = entry.model.trim();
+      }
+
+      record.qa.push(item);
+      record.qa.sort((a, b) => a.createdAt - b.createdAt);
+      record.updatedAt = now();
+      await storage.set(getStorageKey(gameKey), record);
+      return structuredClone(item);
+    },
+
+    async listQa(gameKey) {
+      if (!gameKey) {
+        throw new Error('gameKey 不能为空');
+      }
+      const record = await readRecord(gameKey);
+      if (!record) {
+        return [];
+      }
+      const sorted = [...record.qa].sort((a, b) => a.createdAt - b.createdAt);
       return structuredClone(sorted);
     },
 
@@ -221,7 +287,8 @@ export function createClueStore({ storage, now = Date.now, id }) {
           if (g) {
             list.push({
               ...g,
-              clues: Array.isArray(g.clues) ? g.clues : []
+              clues: Array.isArray(g.clues) ? g.clues : [],
+              qa: Array.isArray(g.qa) ? g.qa : []
             });
           }
         }
@@ -253,7 +320,8 @@ export function createClueStore({ storage, now = Date.now, id }) {
           if (g) {
             games.push({
               ...g,
-              clues: Array.isArray(g.clues) ? g.clues : []
+              clues: Array.isArray(g.clues) ? g.clues : [],
+              qa: Array.isArray(g.qa) ? g.qa : []
             });
           }
         }
@@ -275,6 +343,16 @@ export function createClueStore({ storage, now = Date.now, id }) {
               const tags = clue.tags && clue.tags.length ? ` \`${clue.tags.join('` `')}\`` : '';
               const time = new Date(clue.createdAt).toLocaleTimeString();
               md += `- **[${time}]** ${clue.text}${tags} *(来源: ${clue.source})*\n`;
+            }
+            md += '\n';
+          }
+          if (Array.isArray(game.qa) && game.qa.length > 0) {
+            md += `### 问答记录\n\n`;
+            const sortedQa = [...game.qa].sort((a, b) => b.createdAt - a.createdAt);
+            for (const q of sortedQa) {
+              const time = new Date(q.createdAt).toLocaleTimeString();
+              md += `- **[${time}] 问**：${q.question}\n`;
+              md += `  - **答**：${q.answer}\n`;
             }
             md += '\n';
           }

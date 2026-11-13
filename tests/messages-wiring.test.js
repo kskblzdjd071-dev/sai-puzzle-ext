@@ -8,6 +8,7 @@ import { createMessageRouter } from '../background/message-router.js';
 import {
   createMessage,
   PING,
+  PANEL_READY,
   SETTINGS_SAVE,
   SITES_ADD,
   SITES_REMOVE,
@@ -86,6 +87,7 @@ async function setup(overrides = {}) {
   };
   const now = overrides.now || Date.now;
   const screenshotThrottleMap = overrides.screenshotThrottleMap || new Map();
+  const injectReadersIntoOpenTabs = overrides.injectReadersIntoOpenTabs;
 
   const router = createMessageRouter({
     settingsService,
@@ -100,6 +102,7 @@ async function setup(overrides = {}) {
     broadcast,
     now,
     screenshotThrottleMap,
+    injectReadersIntoOpenTabs,
   });
 
   return { router, settingsService, clueStore, extractCalls, answerCalls, broadcasts, sentTabs, permissions };
@@ -324,4 +327,90 @@ test('PROVIDER_PERMISSION_REQUEST 把 baseUrl 传给 requestProviderHostPermissi
 
   assert.equal(res.ok, true);
   assert.equal(res.payload.granted, true);
+});
+
+test('PANEL_READY 触发 injectReadersIntoOpenTabs，即使注入抛错仍返回正常 ok:true 响应', async () => {
+  let injectCalls = 0;
+  const { router } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    injectReadersIntoOpenTabs: async () => {
+      injectCalls += 1;
+      throw new Error('模拟注入失败');
+    },
+  });
+
+  const res = await router.handleMessage(createMessage(PANEL_READY, {}));
+  assert.equal(injectCalls, 1, 'injectReadersIntoOpenTabs 应被调用一次');
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.origin, 'https://game.example.com');
+  assert.equal(Array.isArray(res.payload.clues), true);
+});
+
+test('AI_ASK 成功后自动将问答持久化到 clueStore，并脱敏 apiKey', async () => {
+  const fakeSettings = makeRecordingFakeSettings({
+    getSettings: async () => ({ apiKey: TEST_API_KEY, model: 'gpt-4o' }),
+  });
+  const gameKey = 'https://game.example.com::room-1';
+  const { router, clueStore } = await setup({
+    settingsService: fakeSettings,
+    answerResult: {
+      summary: `含有密钥 ${TEST_API_KEY}`,
+      suggestions: [`带密钥 ${TEST_API_KEY}`],
+      answer: `密码是 4312 (${TEST_API_KEY})`,
+      model: 'gpt-4o',
+    },
+  });
+
+  const res = await router.handleMessage(
+    createMessage(AI_ASK, { gameKey, question: `提问含 ${TEST_API_KEY}` })
+  );
+  assert.equal(res.ok, true);
+
+  const exported = await clueStore.exportJSON(gameKey);
+  assert.equal(exported.includes(TEST_API_KEY), false, '导出严禁包含明文 apiKey');
+  assert.ok(exported.includes('***'));
+
+  const parsed = JSON.parse(exported);
+  assert.equal(parsed.games[0].qa.length, 1);
+  assert.ok(parsed.games[0].qa[0].question.includes('***'));
+  assert.ok(parsed.games[0].qa[0].answer.includes('***'));
+});
+
+test('READER_DELTA 未传 gameKey 时通过 resolveGameId 写入站点对应复合主键', async () => {
+  const storage = createMemoryStorageAdapter();
+  const origin = 'https://site-with-id.com';
+  const gameId = 'sub-game-9';
+  const compositeKey = `${origin}::${gameId}`;
+
+  const fakeSettings = makeRecordingFakeSettings({
+    getSettings: async () => ({
+      apiKey: TEST_API_KEY,
+      gameSites: [{ origin, gameId, enabled: true, granted: true }],
+    }),
+  });
+
+  const { router, clueStore } = await setup({
+    storage,
+    settingsService: fakeSettings,
+    containsOrigin: async () => true,
+    extractResult: {
+      clues: [{ text: '找到钥匙卡', source: 'text' }],
+      model: 'gpt-4o',
+    },
+  });
+
+  await router.handleMessage(
+    createMessage(READER_DELTA, {
+      origin,
+      text: '抽屉里有钥匙卡',
+    })
+  );
+
+  const cluesAtComposite = await clueStore.listClues(compositeKey);
+  assert.equal(cluesAtComposite.length, 1);
+  assert.equal(cluesAtComposite[0].text, '找到钥匙卡');
+
+  const cluesAtBare = await clueStore.listClues(origin);
+  assert.equal(cluesAtBare.length, 0);
 });
