@@ -395,10 +395,19 @@ export interface ExtensionResponse<T = any> {
 - **环境安全**：此模块严禁接收、持有或查询 API Key。
 - **文本抓取**：
   - `collectVisibleText(doc = document): string`：深度遍历 DOM 树，忽略 `<script>`、`<style>`、`<noscript>`、`<iframe>`、`svg`、以及样式为 `display: none`、`visibility: hidden` 的节点。跳过插件自身注入的 UI（带有 `data-sai-ext` 属性的整棵子树）以防倒计时文本污染。过滤大段固定的菜单与页脚，返回规范化（多空格折叠为单空格）的文本。
-  - `computeDelta(prev: string, next: string): string`：计算纯新增字符增量。对比前先对数字与时间标记（如倒计时、时分秒）归一化，若仅时间或数字变化则判定无实质变动并返回空字符串 `""`；若 `next` 包含 `prev`，直接截取尾部差异；若页面整体翻新，通过分行差异匹配返回新增段落。无新增或仅计时器变动返回空字符串 `""`。
-- **定时合并调度**：
-  - `startReader(config)` 挂载 `MutationObserver` 监听 `document.body` 的 `childList` 与 `characterData` 变动。
-  - 启动周期为 `batchIntervalMs`（默认 5000ms）的 `setInterval` 冲刷器。每次冲刷调用 `computeDelta`，仅当存在有意义非空增量时才发送 `READER_DELTA` 消息至后台，避免重复触发后台 AI 提取。
+  - `computeDelta(prev: string, next: string): string`：计算纯新增字符增量。
+    - **计时类数字过滤**：针对明确的倒计时、冷却与时钟格式（如 `冷却 5s`、`剩余 12 秒`、单独 `5s`/`12秒`、`00:59`、`01:30`、`1:02:03`、`倒计时 10`），自第 1 次变化起即被归一化忽略，两者等价时返回空字符串 `""`。
+    - **普通线索数字保留**：保险箱密码、房间号、坐标、分数等非计时数字不会被全局占位抹除。周围文本不变但数字更新的单次同位变化（如 `保险箱密码 4721` -> `9035`、`分数 100` -> `105`）均被视作实质变动，返回非空增量且包含新数字。
+    - **文本比对保底**：若 `next` 包含 `prev`，直接截取尾部差异；若页面整体翻新，通过分行差异匹配返回新增段落；空白折叠后无变动返回 `""`。
+- **定时合并调度与跳动数字终值补发**：
+  - `startReader(config)` 挂载 `MutationObserver` 监听 `document.body` 的 `childList` 与 `characterData` 变动。支持在 `config.now` 注入假时钟函数以供可测性验证。
+  - 启动周期为 `batchIntervalMs`（默认 5000ms）的 `setInterval` 冲刷器。
+  - **同位数字跳动判定与终值补发规则**：
+    - 对同一骨架位置上的数字变化进行多轮冲刷状态跟踪。在约 30 秒窗口内，第 1 次与第 2 次同位变化正常视作新增内容发送。
+    - 当该位置在 30 秒窗口内连续发生第 3 次及以上变化时，判定该位置为“跳动值”，此后忽略该位置后续的快速变动。
+    - 被判定为跳动的位置，若随后超过 5 秒（严格大于 5000ms）不再变动，则在冲刷时将该最终稳定值作为新内容补发恰好一次（保证玩家转动密码盘等操作停驻后的有效线索不丢失），补发后清除跳动状态。
+    - 明确的倒计时与时钟等计时类数字永远不走“稳定后补发终值”逻辑。
+  - `stopReader()` 负责清理监听器、定时器、浮动按钮以及跳动状态记录，并将时钟恢复为系统默认。
 - **Canvas 视觉侦测**：
   - `shouldCaptureCanvas(doc = document): boolean`：遍历页面 `<canvas>`，若存在尺寸大于 `300x200` 或覆盖视口面积 30% 以上的活跃 Canvas，判定为画布游戏。
   - 仅在判定为画布游戏时，在页面右下角插入微型浮动按钮「发送截图解谜」（打上 `data-sai-ext="1"` 属性并带有倒计时冷却禁用态）；同时对主 Canvas 进行每 5 秒一次的微型采样（在离屏画布上绘制为 `16x16` 灰度并生成 Hash 校验和）。若连续两次采样哈希不一致且已度过 30 秒冷却，自动触发 `requestScreenshot('visual_change')`。

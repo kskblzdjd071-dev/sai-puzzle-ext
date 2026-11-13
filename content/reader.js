@@ -28,6 +28,21 @@ let lastScreenshotTime = 0;
 let lastCanvasHash = null;
 let isListenerRegistered = false;
 
+// 注入时钟支持（测试与文本稳定检测）
+let getNow = () => Date.now();
+
+// 跟踪同一文本骨架中各数字 slot 的变动历史
+// slotKey -> {
+//   skeleton: string,
+//   slotIndex: number,
+//   lastVal: string,
+//   changeTimes: number[],
+//   isJumping: boolean,
+//   lastChangeAt: number,
+//   finalEmitted: boolean
+// }
+let slotTracker = new Map();
+
 function safeGetDoc() {
   return typeof document !== 'undefined' ? document : null;
 }
@@ -131,14 +146,26 @@ export function collectVisibleText(doc = safeGetDoc()) {
   return texts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-function normalizeTemporalAndNumericTokens(str) {
+// 归一化明确的计时/倒计时/时钟格式
+function normalizeTemporalTokens(str) {
   if (!str) return '';
   return str
-    .replace(/(?:冷却\s*)?\d+(?:\.\d+)?\s*(?:秒|s|sec|seconds?)\b/gi, '__NUM__')
-    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, '__NUM__')
-    .replace(/\d+/g, '__NUM__')
+    .replace(/(?:剩余|剩余时间|倒计时|冷却)?\s*\b\d{1,2}:\d{2}(?::\d{2})?\b/gi, '__TIME__')
+    .replace(/(?:剩余|剩余时间|冷却)?\s*\d+(?:\.\d+)?\s*(?:秒|s|sec|seconds?)\b/gi, '__TIME__')
+    .replace(/倒计时\s*\d+/gi, '__TIME__')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+// 提取文本中的数字 token 以及剥离数字后的骨架
+function extractNumericSlots(str) {
+  const tokens = [];
+  let tokenIndex = 0;
+  const skeleton = str.replace(/\d+/g, (match) => {
+    tokens.push({ val: match, index: tokenIndex++ });
+    return '__NUM_SLOT__';
+  });
+  return { skeleton, tokens };
 }
 
 export function computeDelta(prev, next) {
@@ -149,7 +176,8 @@ export function computeDelta(prev, next) {
   if (!p) return n;
   if (p === n) return '';
 
-  if (normalizeTemporalAndNumericTokens(p) === normalizeTemporalAndNumericTokens(n)) {
+  // (a) 若仅有计时/倒计时/时钟发生变化，则返回空串
+  if (normalizeTemporalTokens(p) === normalizeTemporalTokens(n)) {
     return '';
   }
 
@@ -180,6 +208,12 @@ export function computeDelta(prev, next) {
 
   const result = diffParts.join('\n').replace(/[ \t]+/g, ' ').trim();
   if (!result || result === p) {
+    // 骨架等价但非计时数字发生单次同位变化时的保全（如「保险箱密码 4721」->「保险箱密码 9035」）
+    const pSlots = extractNumericSlots(p);
+    const nSlots = extractNumericSlots(n);
+    if (pSlots.skeleton === nSlots.skeleton && pSlots.tokens.length === nSlots.tokens.length) {
+      return n;
+    }
     return '';
   }
   return result;
@@ -412,9 +446,84 @@ export function flushBatch(force = true) {
   }
   isDomDirty = false;
 
+  const now = getNow();
   const doc = safeGetDoc();
   const next = collectVisibleText(doc);
-  const delta = computeDelta(previousText, next);
+  const prev = previousText;
+
+  // 1. 检测同位数字变化与跳动状态
+  const pNormTime = normalizeTemporalTokens(prev);
+  const nNormTime = normalizeTemporalTokens(next);
+  const isPureTemporalChange = prev !== next && pNormTime === nNormTime;
+
+  let shouldSuppressDueToJumping = false;
+  let stabilizedFinalToSend = null;
+
+  const pSlots = extractNumericSlots(prev);
+  const nSlots = extractNumericSlots(next);
+  const isSameSkeleton = pSlots.skeleton.length > 0 && pSlots.skeleton === nSlots.skeleton && pSlots.tokens.length === nSlots.tokens.length;
+
+  if (isSameSkeleton) {
+    for (let i = 0; i < nSlots.tokens.length; i++) {
+      const pVal = pSlots.tokens[i].val;
+      const nVal = nSlots.tokens[i].val;
+      const slotKey = `${nSlots.skeleton}:::slot_${i}`;
+      let record = slotTracker.get(slotKey);
+
+      if (!record) {
+        record = {
+          lastVal: pVal,
+          changeTimes: [],
+          isJumping: false,
+          lastChangeAt: now,
+          finalEmitted: false
+        };
+        slotTracker.set(slotKey, record);
+      }
+
+      if (pVal !== nVal) {
+        // 发生了同位数值变化
+        record.lastVal = nVal;
+        record.lastChangeAt = now;
+        record.finalEmitted = false;
+
+        // 30 秒滑动窗口
+        record.changeTimes = record.changeTimes.filter(t => now - t <= 30000);
+        record.changeTimes.push(now);
+
+        if (record.changeTimes.length >= 3) {
+          record.isJumping = true;
+          // 第 3 次及以上进入跳动抑制
+          shouldSuppressDueToJumping = true;
+        }
+      } else {
+        // 同位数值未变：检查是否曾经判定跳动且 >5000ms 稳定
+        if (record.isJumping && !record.finalEmitted && !isPureTemporalChange && /\d/.test(nNormTime)) {
+          if (now - record.lastChangeAt > 5000) {
+            stabilizedFinalToSend = next;
+            record.finalEmitted = true;
+            // 发送后清空该位置跳动状态
+            slotTracker.delete(slotKey);
+          }
+        }
+      }
+    }
+  }
+
+  // 2. 计算增量并决定是否发送
+  let delta = computeDelta(prev, next);
+
+  if (delta.length > 0) {
+    if (shouldSuppressDueToJumping) {
+      // 被判定为跳动值，抑制发送
+      delta = '';
+    }
+  }
+
+  // 若存在稳定后的终值需补发
+  if (!delta && stabilizedFinalToSend) {
+    delta = stabilizedFinalToSend;
+  }
 
   if (delta.length > 0) {
     const win = safeGetWindow();
@@ -460,6 +569,8 @@ export function stopReader() {
   previousText = '';
   isDomDirty = false;
   lastCanvasHash = null;
+  slotTracker.clear();
+  getNow = () => Date.now();
 }
 
 export function startReader(config) {
@@ -472,6 +583,12 @@ export function startReader(config) {
     enabled: true,
     ...(config || {})
   };
+
+  if (typeof config?.now === 'function') {
+    getNow = config.now;
+  } else {
+    getNow = () => Date.now();
+  }
 
   if (currentConfig.enabled === false) {
     return;
