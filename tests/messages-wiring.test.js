@@ -19,6 +19,8 @@ import {
   ACTIVE_TAB_INFO,
   AI_ASK,
   PANEL_READY,
+  READER_SCREENSHOT_REQUEST,
+  READER_SCREENSHOT_RESULT,
 } from '../core/messages.js';
 import { createMemoryStorageAdapter } from '../adapters/storage.js';
 import { createSettingsService } from '../core/settings.js';
@@ -79,6 +81,8 @@ async function setup(overrides = {}) {
   const getActiveTab = overrides.getActiveTab || (async () => null);
   const getTabById = overrides.getTabById || (async () => null);
   const captureVisibleTab = overrides.captureVisibleTab || (async () => 'data:image/jpeg;base64,AAAA');
+  const queryIsCanvas = overrides.queryIsCanvas;
+  const captureCanvas = overrides.captureCanvas;
   const sendToTab = async (id, msg) => {
     sentTabs.push({ id, msg });
   };
@@ -98,6 +102,8 @@ async function setup(overrides = {}) {
     getActiveTab,
     getTabById,
     captureVisibleTab,
+    queryIsCanvas,
+    captureCanvas,
     sendToTab,
     broadcast,
     now,
@@ -300,7 +306,105 @@ test('ACTIVE_TAB_INFO 返回 origin/isGranted/isCanvas/title 而不是 tab', asy
   assert.equal(res.payload.isGranted, true);
   assert.equal(res.payload.title, '谜题');
   assert.equal('isCanvas' in res.payload, true);
+  assert.equal(res.payload.isCanvas, false);
   assert.equal(res.payload.tab, undefined);
+});
+
+test('ACTIVE_TAB_INFO 当 queryIsCanvas 返回 true 时 isCanvas 为 true，返回 false 时为 false', async () => {
+  const { router: routerTrue } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    queryIsCanvas: async () => true,
+  });
+  const resTrue = await routerTrue.handleMessage(createMessage(ACTIVE_TAB_INFO, {}));
+  assert.equal(resTrue.ok, true);
+  assert.equal(resTrue.payload.isCanvas, true);
+
+  const { router: routerFalse } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    queryIsCanvas: async () => false,
+  });
+  const resFalse = await routerFalse.handleMessage(createMessage(ACTIVE_TAB_INFO, {}));
+  assert.equal(resFalse.ok, true);
+  assert.equal(resFalse.payload.isCanvas, false);
+});
+
+test('READER_SCREENSHOT_REQUEST 在 payload 已带合法 image 时，即使 captureVisibleTab 抛错，也应 ok 且交由 extractClues', async () => {
+  let captureCalled = false;
+  const { router, extractCalls } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    captureVisibleTab: async () => {
+      captureCalled = true;
+      throw new Error('captureVisibleTab fail');
+    },
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE' }
+  }));
+
+  assert.equal(captureCalled, false);
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, true);
+  assert.equal(extractCalls.length, 1);
+  assert.deepEqual(extractCalls[0][1], { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE' });
+});
+
+test('READER_SCREENSHOT_REQUEST 在 payload 无图但 captureCanvas 返回合法 dataUrl 时，不调用 captureVisibleTab', async () => {
+  let captureCalled = false;
+  const { router, extractCalls } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    captureCanvas: async () => 'data:image/png;base64,FROM_CANVAS_DATA',
+    captureVisibleTab: async () => {
+      captureCalled = true;
+      throw new Error('captureVisibleTab fail');
+    },
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com'
+  }));
+
+  assert.equal(captureCalled, false);
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, true);
+  assert.equal(extractCalls.length, 1);
+  assert.deepEqual(extractCalls[0][1], { mimeType: 'image/png', dataBase64: 'FROM_CANVAS_DATA' });
+});
+
+test('READER_SCREENSHOT_REQUEST 在 payload 无图且 canvas 采集也没有，captureVisibleTab 抛错时返回错误', async () => {
+  const { router, broadcasts } = await setup({
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    captureCanvas: async () => null,
+    captureVisibleTab: async () => {
+      throw new Error('captureVisibleTab failed');
+    },
+  });
+
+  const res = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com'
+  }));
+
+  assert.equal(res.ok, true);
+  assert.equal(res.payload.ok, false);
+  assert.match(res.payload.error, /网页截图失败/);
+  const resultBroadcast = broadcasts.find(b => b.type === 'READER_SCREENSHOT_RESULT');
+  assert.ok(resultBroadcast);
+  assert.equal(resultBroadcast.payload.ok, false);
+  assert.match(resultBroadcast.payload.error, /网页截图失败/);
+});
+
+test('service-worker 源码将 queryIsCanvas 与 captureCanvas 传给了 createMessageRouter', async () => {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const swCode = await fs.readFile(path.resolve('./background/service-worker.js'), 'utf8');
+  assert.ok(swCode.includes('queryIsCanvas,') || swCode.includes('queryIsCanvas:'));
+  assert.ok(swCode.includes('captureCanvas,') || swCode.includes('captureCanvas:'));
 });
 
 test('PROVIDER_PERMISSION_REQUEST 把 baseUrl 传给 requestProviderHostPermission', async () => {

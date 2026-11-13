@@ -30,7 +30,7 @@
    - 各 AI 服务商域名（如 `api.openai.com`）必须在用户切换或保存供应商时，按需申请 Optional Host 权限。
 4. **读取与截图节流策略**：
    - 页面文本使用 `MutationObserver` 采集，必须经过 5000ms 窗口合并，计算字符级增量（Delta），仅把新增文本发给 AI。
-   - 截图仅针对检测为画布类（Canvas/WebGL）的游戏页面启用。自动截图与手动截图必须经过至少 30000ms 强制冷却。截图由 Content Script 发起请求，由 Background 调用 `chrome.tabs.captureVisibleTab` 执行。页面无新文本且无新截图、用户未提问时，严禁调用 AI。
+   - 截图仅针对检测为画布类（Canvas/WebGL）的游戏页面启用。自动截图与手动截图必须经过至少 30000ms 强制冷却。截图由 Content Script 发起请求，优先使用主 canvas 图像（toDataURL / payload.image），没有有效画布图时再回退 Background 调用 `chrome.tabs.captureVisibleTab` 执行。页面无新文本且无新截图、用户未提问时，严禁调用 AI。
 5. **UI 与宿主解耦**：
    - 提问界面 `ui/panel.html` 作为独立页面开发，通过 `mountPanel(root, port)` 挂载。在 Chrome 下作为 Side Panel 呈现，但其内部业务逻辑不得直接依赖 `chrome.sidePanel`，侧栏生命周期由 Background 掌控。
 6. **技术基线**：
@@ -290,7 +290,7 @@ export interface ExtensionResponse<T = any> {
 | `READER_CONFIG` | Background → Content | `{ batchIntervalMs: number, screenshotMaxIntervalMs: number, gameKey: string, enabled: boolean }` | 下发给 Content Script 的工作参数。 |
 | `READER_DELTA` | Content → Background | `{ origin: string, gameKey?: string, text: string, title?: string }` | 页面文本合并增量上报。gameKey 缺省时根据 origin 与 settings 中的 gameId 解析复合键。Background 接收后交由 `aiClient.extractClues` 处理，产生新线索自动存入 Store。 |
 | `READER_FLUSH` | Panel/Background → Content | `{}` | 强制 Content Script 立即清空当前文本合并缓冲区并向后台发射 `READER_DELTA`。 |
-| `READER_SCREENSHOT_REQUEST` | Content/Panel → Background | `{ origin: string, gameKey?: string, reason: 'user' \| 'visual_change', tabId?: number }` | 请求 Background 对当前标签页执行截屏。gameKey 缺省时自动补齐 gameId。Background 校验节流，执行 `captureVisibleTab`，转送 AI。 |
+| `READER_SCREENSHOT_REQUEST` | Content/Panel → Background | `{ origin: string, gameKey?: string, reason: 'user' \| 'visual_change', tabId?: number, image?: { mimeType: string, dataBase64: string } }` | 请求 Background 对当前标签页执行截屏。payload 可带主 canvas image。gameKey 缺省时自动补齐 gameId。Background 校验节流，优先使用该图或调用标签页主 canvas 抓取，失败时回退 `captureVisibleTab`，转送 AI。 |
 | `READER_SCREENSHOT_RESULT` | Background → Content/Panel | `{ ok: boolean, reason: string, skipped?: 'throttled' \| 'no_tab' \| 'permission', error?: string }` | 截屏调度反馈结果。 |
 | `AI_EXTRACT` | Background (内部) / Panel | `{ gameKey: string, delta?: string, image?: { mimeType: string, dataBase64: string } }` | 触发单次线索抽取。响应 `ExtractCluesResult`。 |
 | `AI_ASK` | Panel → Background | `{ gameKey: string, question: string }` | 用户提交提问。Background 调取该游戏全部线索，送入 `aiClient.answerQuestion`；成功后将问答脱敏存入 ClueStore，响应 `AnswerQuestionResult`。 |
@@ -458,7 +458,7 @@ export interface ExtensionResponse<T = any> {
 - **双重截取节流器**：
   - 维护内存映射表 `screenshotThrottleMap: Map<string, number>`，键为 `${tabId}::${origin}`。
   - 无论 Content Script 何时触发，Background 校验当前时间戳与上次成功截图时间戳差值。若小于 30000ms，直接拦截并回复 `{ ok: false, skipped: 'throttled' }`。
-  - 截屏动作调用 `chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 })`。执行前必须检查目标 Tab 的 Origin 是否在已授权列表中，未授权时静默丢弃。
+  - 截屏动作优先提取主 canvas 图像（侧栏「检测到游戏画布」依赖 queryIsCanvas；requestScreenshot 成功时会附带主 canvas 图像），若无可用画布图像则回退调用 `chrome.tabs.captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 })`。执行前必须检查目标 Tab 的 Origin 是否在已授权列表中，未授权时静默丢弃。
 - **自动流水线编排**：
   - 收到 `READER_DELTA` 消息后：
     1. 校验 Origin 授权；

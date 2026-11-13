@@ -410,6 +410,22 @@ export function shouldCaptureCanvas(doc = safeGetDoc()) {
   return findPrimaryCanvas(doc) !== null;
 }
 
+export function capturePrimaryCanvasImage(doc = safeGetDoc()) {
+  const canvas = findPrimaryCanvas(doc);
+  if (!canvas || typeof canvas.toDataURL !== 'function') return null;
+  try {
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+    const matched = /^data:([^;]+);base64,(.+)$/.exec(String(dataUrl || ''));
+    if (!matched) return null;
+    return {
+      mimeType: matched[1],
+      dataBase64: matched[2]
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
 function findPrimaryCanvas(doc = safeGetDoc()) {
   if (!doc || typeof doc.querySelectorAll !== 'function') return null;
 
@@ -619,11 +635,16 @@ export function requestScreenshot(reason) {
 
   const win = safeGetWindow();
   const origin = win && win.location ? win.location.origin : '';
-  const message = createMessage(READER_SCREENSHOT_REQUEST, {
+  const canvasImage = capturePrimaryCanvasImage(doc);
+  const payload = {
     origin,
     gameKey: currentConfig.gameKey || undefined,
     reason
-  });
+  };
+  if (canvasImage) {
+    payload.image = canvasImage;
+  }
+  const message = createMessage(READER_SCREENSHOT_REQUEST, payload);
   safeSendMessage(message);
 }
 

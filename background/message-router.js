@@ -46,6 +46,7 @@ export function createMessageRouter(deps) {
     getTabById,
     containsOrigin,
     captureVisibleTab,
+    captureCanvas,
     sendToTab,
     broadcast,
     queryIsCanvas,
@@ -435,25 +436,58 @@ export function createMessageRouter(deps) {
             return screenshotResult(false, reason, { skipped: 'throttled' });
           }
 
-          let dataUrl = '';
-          try {
-            if (typeof captureVisibleTab !== 'function') {
-              throw new Error('截图能力未就绪');
+          let mimeType = '';
+          let dataBase64 = '';
+
+          if (payload.image && typeof payload.image === 'object') {
+            if (typeof payload.image.mimeType === 'string' && typeof payload.image.dataBase64 === 'string' && payload.image.dataBase64) {
+              mimeType = payload.image.mimeType;
+              dataBase64 = payload.image.dataBase64;
             }
-            if (tab.windowId == null) {
-              throw new Error('无法获取窗口信息');
+          } else if (typeof payload.image === 'string' && payload.image) {
+            const matchedPayload = /^data:([^;]+);base64,(.+)$/.exec(payload.image);
+            if (matchedPayload) {
+              mimeType = matchedPayload[1];
+              dataBase64 = matchedPayload[2];
             }
-            dataUrl = await captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
-          } catch (_) {
-            return screenshotResult(false, reason, { error: '网页截图失败，请稍后再试' });
           }
 
-          const matched = /^data:([^;]+);base64,(.+)$/.exec(String(dataUrl || ''));
-          if (!matched) {
-            return screenshotResult(false, reason, { error: '截图数据格式无效' });
+          if (!dataBase64 && typeof captureCanvas === 'function') {
+            try {
+              const canvasDataUrl = await captureCanvas(tab);
+              if (canvasDataUrl && typeof canvasDataUrl === 'string') {
+                const matchedCanvas = /^data:([^;]+);base64,(.+)$/.exec(canvasDataUrl);
+                if (matchedCanvas) {
+                  mimeType = matchedCanvas[1];
+                  dataBase64 = matchedCanvas[2];
+                }
+              }
+            } catch (_) {
+              /* 采集画布异常则尝试捕获可视标签页 */
+            }
           }
-          const mimeType = matched[1];
-          const dataBase64 = matched[2];
+
+          if (!dataBase64) {
+            let dataUrl = '';
+            try {
+              if (typeof captureVisibleTab !== 'function') {
+                throw new Error('截图能力未就绪');
+              }
+              if (tab.windowId == null) {
+                throw new Error('无法获取窗口信息');
+              }
+              dataUrl = await captureVisibleTab(tab.windowId, { format: 'jpeg', quality: 70 });
+            } catch (_) {
+              return screenshotResult(false, reason, { error: '网页截图失败，请稍后再试' });
+            }
+
+            const matched = /^data:([^;]+);base64,(.+)$/.exec(String(dataUrl || ''));
+            if (!matched) {
+              return screenshotResult(false, reason, { error: '截图数据格式无效' });
+            }
+            mimeType = matched[1];
+            dataBase64 = matched[2];
+          }
 
           let gameKey = typeof payload.gameKey === 'string' && payload.gameKey ? payload.gameKey : '';
           if (!gameKey) {

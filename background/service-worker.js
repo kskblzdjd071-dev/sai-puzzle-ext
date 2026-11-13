@@ -233,6 +233,92 @@ if (typeof chrome !== 'undefined' && chrome?.sidePanel && typeof chrome.sidePane
 
 const screenshotThrottleMap = new Map();
 
+async function queryIsCanvas(tab) {
+  if (!tab || tab.id == null || typeof chrome === 'undefined' || !chrome?.scripting?.executeScript) {
+    return false;
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const canvases = document.querySelectorAll('canvas');
+        if (!canvases || canvases.length === 0) return false;
+        const win = window;
+        const viewportArea = (win && win.innerWidth && win.innerHeight)
+          ? win.innerWidth * win.innerHeight
+          : ((document.documentElement && document.documentElement.clientWidth && document.documentElement.clientHeight)
+            ? document.documentElement.clientWidth * document.documentElement.clientHeight
+            : 0);
+        for (let i = 0; i < canvases.length; i++) {
+          const cvs = canvases[i];
+          const width = cvs.clientWidth || cvs.width || 0;
+          const height = cvs.clientHeight || cvs.height || 0;
+          const area = width * height;
+          const meetsDimensions = width > 300 && height > 200;
+          const meetsRatio = viewportArea > 0 && (area / viewportArea >= 0.3);
+          if (meetsDimensions || meetsRatio) return true;
+        }
+        return false;
+      }
+    });
+    if (Array.isArray(results) && results[0] && typeof results[0].result === 'boolean') {
+      return results[0].result;
+    }
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function captureCanvas(tab) {
+  if (!tab || tab.id == null || typeof chrome === 'undefined' || !chrome?.scripting?.executeScript) {
+    return null;
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: () => {
+        const canvases = document.querySelectorAll('canvas');
+        if (!canvases || canvases.length === 0) return null;
+        const win = window;
+        const viewportArea = (win && win.innerWidth && win.innerHeight)
+          ? win.innerWidth * win.innerHeight
+          : ((document.documentElement && document.documentElement.clientWidth && document.documentElement.clientHeight)
+            ? document.documentElement.clientWidth * document.documentElement.clientHeight
+            : 0);
+        let primary = null;
+        let maxArea = 0;
+        for (let i = 0; i < canvases.length; i++) {
+          const cvs = canvases[i];
+          const width = cvs.clientWidth || cvs.width || 0;
+          const height = cvs.clientHeight || cvs.height || 0;
+          const area = width * height;
+          const meetsDimensions = width > 300 && height > 200;
+          const meetsRatio = viewportArea > 0 && (area / viewportArea >= 0.3);
+          if (meetsDimensions || meetsRatio) {
+            if (area > maxArea) {
+              maxArea = area;
+              primary = cvs;
+            }
+          }
+        }
+        if (!primary) return null;
+        try {
+          return primary.toDataURL('image/jpeg', 0.7);
+        } catch (_) {
+          return null;
+        }
+      }
+    });
+    if (Array.isArray(results) && results[0] && typeof results[0].result === 'string') {
+      return results[0].result;
+    }
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
 const router = createMessageRouter({
   settingsService,
   clueStore,
@@ -240,6 +326,8 @@ const router = createMessageRouter({
   screenshotThrottleMap,
   now: Date.now,
   injectReadersIntoOpenTabs,
+  queryIsCanvas,
+  captureCanvas,
   async getActiveTab() {
     if (typeof chrome === 'undefined' || !chrome?.tabs?.query) return null;
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });

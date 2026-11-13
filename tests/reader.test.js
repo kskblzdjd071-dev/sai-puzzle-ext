@@ -4,6 +4,7 @@ import {
   computeDelta,
   collectVisibleText,
   shouldCaptureCanvas,
+  capturePrimaryCanvasImage,
   flushBatch,
   stopReader,
   startReader,
@@ -378,6 +379,69 @@ test('shouldCaptureCanvas: 尺寸判定与视口面积占比判定', () => {
   body3.appendChild(cvs3);
   const doc3 = createDocStub(body3, { viewportWidth: 1000, viewportHeight: 800 });
   assert.equal(shouldCaptureCanvas(doc3), false);
+});
+
+test('capturePrimaryCanvasImage 对合格 canvas 返回 mime 与 base64，对过小或报错 canvas 返回 null', async () => {
+  const reader = await import('../content/reader.js');
+  if (typeof reader.capturePrimaryCanvasImage !== 'function') {
+    assert.fail('capturePrimaryCanvasImage 必须导出');
+  }
+
+  // 1. 合格画布且 toDataURL 正常
+  const docValid = {
+    defaultView: { innerWidth: 1000, innerHeight: 800 },
+    querySelectorAll: (sel) => {
+      if (sel === 'canvas') {
+        return [
+          {
+            clientWidth: 400,
+            clientHeight: 300,
+            toDataURL: (type, q) => 'data:image/jpeg;base64,MOCK_IMAGE_DATA',
+          },
+        ];
+      }
+      return [];
+    },
+  };
+  const validResult = reader.capturePrimaryCanvasImage(docValid);
+  assert.deepEqual(validResult, {
+    mimeType: 'image/jpeg',
+    dataBase64: 'MOCK_IMAGE_DATA',
+  });
+
+  // 2. 过小画布
+  const docSmall = {
+    defaultView: { innerWidth: 1000, innerHeight: 800 },
+    querySelectorAll: (sel) => {
+      if (sel === 'canvas') {
+        return [{ clientWidth: 100, clientHeight: 100, toDataURL: () => 'data:image/jpeg;base64,SMALL' }];
+      }
+      return [];
+    },
+  };
+  const smallResult = reader.capturePrimaryCanvasImage(docSmall);
+  assert.equal(smallResult, null);
+
+  // 3. toDataURL 抛错（如被污染）
+  const docTainted = {
+    defaultView: { innerWidth: 1000, innerHeight: 800 },
+    querySelectorAll: (sel) => {
+      if (sel === 'canvas') {
+        return [
+          {
+            clientWidth: 400,
+            clientHeight: 300,
+            toDataURL: () => {
+              throw new Error('SecurityError: Tainted canvas');
+            },
+          },
+        ];
+      }
+      return [];
+    },
+  };
+  const taintedResult = reader.capturePrimaryCanvasImage(docTainted);
+  assert.equal(taintedResult, null);
 });
 
 test('规则验证 1 & 2: 页面新增密码发送，倒计时格式变动/停住均不补发', () => {
