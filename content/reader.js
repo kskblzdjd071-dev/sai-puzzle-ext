@@ -111,6 +111,10 @@ export function collectVisibleText(doc = safeGetDoc()) {
     }
 
     if (node.nodeType === 1) {
+      if (typeof node.getAttribute === 'function' && node.getAttribute('data-sai-ext') !== null) {
+        return;
+      }
+
       const tag = node.tagName ? node.tagName.toLowerCase() : '';
       if (ignoredTags.has(tag)) return;
       if (!isElementVisible(node, win)) return;
@@ -127,6 +131,16 @@ export function collectVisibleText(doc = safeGetDoc()) {
   return texts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
+function normalizeTemporalAndNumericTokens(str) {
+  if (!str) return '';
+  return str
+    .replace(/(?:冷却\s*)?\d+(?:\.\d+)?\s*(?:秒|s|sec|seconds?)\b/gi, '__NUM__')
+    .replace(/\b\d{1,2}:\d{2}(?::\d{2})?\b/g, '__NUM__')
+    .replace(/\d+/g, '__NUM__')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function computeDelta(prev, next) {
   const p = (prev == null ? '' : String(prev)).replace(/\s+/g, ' ').trim();
   const n = (next == null ? '' : String(next)).replace(/\s+/g, ' ').trim();
@@ -134,6 +148,10 @@ export function computeDelta(prev, next) {
   if (!n) return '';
   if (!p) return n;
   if (p === n) return '';
+
+  if (normalizeTemporalAndNumericTokens(p) === normalizeTemporalAndNumericTokens(n)) {
+    return '';
+  }
 
   if (n.startsWith(p)) {
     const tail = n.slice(p.length).replace(/\s+/g, ' ').trim();
@@ -281,6 +299,9 @@ function ensureFloatingButton(doc = safeGetDoc()) {
 
   const btn = doc.createElement('button');
   btn.id = '__game_reader_screenshot_btn__';
+  if (typeof btn.setAttribute === 'function') {
+    btn.setAttribute('data-sai-ext', '1');
+  }
   btn.innerText = '发送截图解谜';
   btn.style.position = 'fixed';
   btn.style.right = '20px';

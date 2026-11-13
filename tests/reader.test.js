@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   computeDelta,
   collectVisibleText,
-  shouldCaptureCanvas
+  shouldCaptureCanvas,
+  flushBatch,
+  stopReader
 } from '../content/reader.js';
 
 function createNode(tagOrType, attrs = {}) {
@@ -128,6 +130,129 @@ test('computeDelta: 前缀增量、包含子串、无新增及边界测试', () 
   assert.ok(delta.includes('第三段出现了。'));
   assert.ok(delta.includes('第四段紧随其后。'));
   assert.ok(!delta.includes('第一段已经结束。'));
+
+  // 7. 仅数字与时间/倒计时变动时应返回空串
+  assert.equal(
+    computeDelta('房间里有一扇门。剩余时间 01:30', '房间里有一扇门。剩余时间 01:29'),
+    ''
+  );
+  assert.equal(computeDelta('冷却 5s', '冷却 4s'), '');
+  assert.equal(computeDelta('分数 100 倒计时 10', '分数 105 倒计时 09'), '');
+
+  // 8. 出现真正新文本（即使含有数字）时仍应返回非空增量且包含新文本
+  const deltaWithNewText = computeDelta(
+    '房间里有一扇门。剩余时间 01:30',
+    '房间里有一扇门。剩余时间 01:29 墙上写着密码是 4312'
+  );
+  assert.notEqual(deltaWithNewText, '');
+  assert.ok(deltaWithNewText.includes('密码是 4312'));
+});
+
+test('collectVisibleText: 跳过插件自身的 UI (data-sai-ext)', () => {
+  const body = createNode('body');
+
+  const mainP = createNode('p');
+  mainP.appendChild(createTextNode('解谜核心正文'));
+  body.appendChild(mainP);
+
+  const extBtn = createNode('button', {
+    attributes: { 'data-sai-ext': '1' }
+  });
+  extBtn.appendChild(createTextNode('冷却 5s'));
+  body.appendChild(extBtn);
+
+  const extContainer = createNode('div', {
+    attributes: { 'data-sai-ext': 'screenshot-host' }
+  });
+  const extChild = createNode('span');
+  extChild.appendChild(createTextNode('发送截图解谜'));
+  extContainer.appendChild(extChild);
+  body.appendChild(extContainer);
+
+  const doc = createDocStub(body);
+  const collected = collectVisibleText(doc);
+
+  assert.ok(collected.includes('解谜核心正文'));
+  assert.ok(!collected.includes('冷却 5s'));
+  assert.ok(!collected.includes('发送截图解谜'));
+  assert.equal(collected, '解谜核心正文');
+});
+
+test('发送路径零调用测试：仅计时器数字或插件 UI 变化不得触发 sendMessage', () => {
+  stopReader();
+
+  const body = createNode('body');
+
+  const textNode = createTextNode('房间里有一扇门。剩余时间 01:30');
+  const gameParagraph = createNode('p');
+  gameParagraph.appendChild(textNode);
+  body.appendChild(gameParagraph);
+
+  const pluginBtnText = createTextNode('冷却 5s');
+  const pluginBtn = createNode('button', {
+    attributes: { 'data-sai-ext': '1' }
+  });
+  pluginBtn.appendChild(pluginBtnText);
+  body.appendChild(pluginBtn);
+
+  const mockDoc = createDocStub(body);
+
+  const sentMessages = [];
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+
+  globalThis.document = mockDoc;
+  globalThis.chrome = {
+    runtime: {
+      sendMessage(msg, cb) {
+        sentMessages.push(msg);
+        if (typeof cb === 'function') {
+          cb();
+        }
+      }
+    }
+  };
+
+  try {
+    // 第一次冲刷：初始有正文，应发送 1 次初始增量
+    flushBatch(true);
+    assert.equal(sentMessages.length, 1);
+    assert.ok(sentMessages[0].payload.text.includes('房间里有一扇门'));
+    assert.ok(!sentMessages[0].payload.text.includes('冷却 5s'));
+
+    // 仅修改插件自身按钮文案
+    pluginBtnText.nodeValue = '冷却 4s';
+    flushBatch(true);
+    assert.equal(sentMessages.length, 1, '仅插件按钮文案变化时 sendMessage 不得新增调用');
+
+    // 仅修改游戏内倒计时数字
+    textNode.nodeValue = '房间里有一扇门。剩余时间 01:29';
+    flushBatch(true);
+    assert.equal(sentMessages.length, 1, '仅游戏计时器数字变化时 sendMessage 不得新增调用');
+
+    // 当追加真正的新游戏文本时应触发发送
+    const newParagraph = createNode('p');
+    newParagraph.appendChild(createTextNode('墙上出现密码 4312'));
+    body.appendChild(newParagraph);
+    flushBatch(true);
+
+    assert.equal(sentMessages.length, 2, '追加有意义新文本后应触发发送');
+    const latestPayload = sentMessages[1].payload.text;
+    assert.ok(latestPayload.includes('墙上出现密码 4312'));
+    assert.ok(!latestPayload.includes('冷却'));
+  } finally {
+    stopReader();
+    if (originalChrome === undefined) {
+      delete globalThis.chrome;
+    } else {
+      globalThis.chrome = originalChrome;
+    }
+    if (originalDocument === undefined) {
+      delete globalThis.document;
+    } else {
+      globalThis.document = originalDocument;
+    }
+  }
 });
 
 test('collectVisibleText: 标签过滤、样式隐藏、role过滤与保留普通header', () => {

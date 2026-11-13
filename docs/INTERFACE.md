@@ -378,14 +378,14 @@ export interface ExtensionResponse<T = any> {
 ### 9.2 Reader 模块 (`content/reader.js`)
 - **环境安全**：此模块严禁接收、持有或查询 API Key。
 - **文本抓取**：
-  - `collectVisibleText(doc = document): string`：深度遍历 DOM 树，忽略 `<script>`、`<style>`、`<noscript>`、`<iframe>`、`svg`、以及样式为 `display: none`、`visibility: hidden` 的节点。过滤大段固定的菜单与页脚，返回规范化（多空格折叠为单空格）的文本。
-  - `computeDelta(prev: string, next: string): string`：计算纯新增字符增量。若 `next` 包含 `prev`，直接截取尾部差异；若页面整体翻新，通过最长公共子序列（LCS）算法或简化的分行差异匹配，返回新增段落。无新增则返回空字符串 `""`。
+  - `collectVisibleText(doc = document): string`：深度遍历 DOM 树，忽略 `<script>`、`<style>`、`<noscript>`、`<iframe>`、`svg`、以及样式为 `display: none`、`visibility: hidden` 的节点。跳过插件自身注入的 UI（带有 `data-sai-ext` 属性的整棵子树）以防倒计时文本污染。过滤大段固定的菜单与页脚，返回规范化（多空格折叠为单空格）的文本。
+  - `computeDelta(prev: string, next: string): string`：计算纯新增字符增量。对比前先对数字与时间标记（如倒计时、时分秒）归一化，若仅时间或数字变化则判定无实质变动并返回空字符串 `""`；若 `next` 包含 `prev`，直接截取尾部差异；若页面整体翻新，通过分行差异匹配返回新增段落。无新增或仅计时器变动返回空字符串 `""`。
 - **定时合并调度**：
   - `startReader(config)` 挂载 `MutationObserver` 监听 `document.body` 的 `childList` 与 `characterData` 变动。
-  - 启动周期为 `batchIntervalMs`（默认 5000ms）的 `setInterval` 冲刷器。每次冲刷调用 `computeDelta`，若存在非空增量，发送 `READER_DELTA` 消息至后台。
+  - 启动周期为 `batchIntervalMs`（默认 5000ms）的 `setInterval` 冲刷器。每次冲刷调用 `computeDelta`，仅当存在有意义非空增量时才发送 `READER_DELTA` 消息至后台，避免重复触发后台 AI 提取。
 - **Canvas 视觉侦测**：
   - `shouldCaptureCanvas(doc = document): boolean`：遍历页面 `<canvas>`，若存在尺寸大于 `300x200` 或覆盖视口面积 30% 以上的活跃 Canvas，判定为画布游戏。
-  - 仅在判定为画布游戏时，在页面右下角插入微型浮动按钮「发送截图解谜」（带有倒计时冷却禁用态）；同时对主 Canvas 进行每 5 秒一次的微型采样（在离屏画布上绘制为 `16x16` 灰度并生成 Hash 校验和）。若连续两次采样哈希不一致且已度过 30 秒冷却，自动触发 `requestScreenshot('visual_change')`。
+  - 仅在判定为画布游戏时，在页面右下角插入微型浮动按钮「发送截图解谜」（打上 `data-sai-ext="1"` 属性并带有倒计时冷却禁用态）；同时对主 Canvas 进行每 5 秒一次的微型采样（在离屏画布上绘制为 `16x16` 灰度并生成 Hash 校验和）。若连续两次采样哈希不一致且已度过 30 秒冷却，自动触发 `requestScreenshot('visual_change')`。
 
 ### 9.3 AI 模块 (`core/ai.js` & `core/providers/*`)
 - **密钥断言防御**：
