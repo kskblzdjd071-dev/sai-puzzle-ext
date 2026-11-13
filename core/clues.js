@@ -183,28 +183,28 @@ export function createClueStore({ storage, now = Date.now, id }) {
         };
       }
 
-      const item = {
+      const qaItem = {
         id: entry.id || nextId(),
         gameKey,
         question,
         answer,
-        createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : now()
+        createdAt: now()
       };
+
       if (typeof entry.summary === 'string' && entry.summary.trim()) {
-        item.summary = entry.summary.trim();
+        qaItem.summary = entry.summary.trim();
       }
-      if (Array.isArray(entry.suggestions)) {
-        item.suggestions = entry.suggestions.map((s) => String(s).trim()).filter(Boolean);
+      if (Array.isArray(entry.suggestions) && entry.suggestions.length > 0) {
+        qaItem.suggestions = entry.suggestions.map((s) => String(s).trim()).filter(Boolean);
       }
       if (typeof entry.model === 'string' && entry.model.trim()) {
-        item.model = entry.model.trim();
+        qaItem.model = entry.model.trim();
       }
 
-      record.qa.push(item);
-      record.qa.sort((a, b) => a.createdAt - b.createdAt);
+      record.qa.push(qaItem);
       record.updatedAt = now();
       await storage.set(getStorageKey(gameKey), record);
-      return structuredClone(item);
+      return structuredClone(qaItem);
     },
 
     async listQa(gameKey) {
@@ -346,15 +346,14 @@ export function createClueStore({ storage, now = Date.now, id }) {
             }
             md += '\n';
           }
+
           if (Array.isArray(game.qa) && game.qa.length > 0) {
             md += `### 问答记录\n\n`;
-            const sortedQa = [...game.qa].sort((a, b) => b.createdAt - a.createdAt);
-            for (const q of sortedQa) {
-              const time = new Date(q.createdAt).toLocaleTimeString();
-              md += `- **[${time}] 问**：${q.question}\n`;
-              md += `  - **答**：${q.answer}\n`;
+            const sortedQa = [...game.qa].sort((a, b) => a.createdAt - b.createdAt);
+            for (const item of sortedQa) {
+              md += `**问**：${item.question}\n\n`;
+              md += `**答**：${item.answer}\n\n`;
             }
-            md += '\n';
           }
         }
       }

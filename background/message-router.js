@@ -291,31 +291,28 @@ export function createMessageRouter(deps) {
             payload.question,
             Array.isArray(clues) ? clues : []
           );
+
           if (gameKey && result && clueStore && typeof clueStore.addQa === 'function') {
             try {
-              let safeQuestion = payload.question;
-              let safeAnswer = result.answer;
-              let safeSummary = result.summary;
-              let safeSuggestions = result.suggestions;
-              if (apiKey && typeof apiKey === 'string') {
-                safeQuestion = safeQuestion ? String(safeQuestion).replaceAll(apiKey, '***') : safeQuestion;
-                safeAnswer = safeAnswer ? String(safeAnswer).replaceAll(apiKey, '***') : safeAnswer;
-                safeSummary = safeSummary ? String(safeSummary).replaceAll(apiKey, '***') : safeSummary;
-                if (Array.isArray(safeSuggestions)) {
-                  safeSuggestions = safeSuggestions.map((s) => String(s).replaceAll(apiKey, '***'));
-                }
-              }
-              await clueStore.addQa(gameKey, {
-                question: safeQuestion,
-                answer: safeAnswer,
-                summary: safeSummary,
-                suggestions: safeSuggestions,
+              const sanitize = (text) => {
+                if (typeof text !== 'string') return text;
+                return apiKey ? text.replaceAll(apiKey, '***') : text;
+              };
+              const qaEntry = {
+                question: sanitize(payload.question),
+                answer: sanitize(result.answer),
+                summary: sanitize(result.summary),
+                suggestions: Array.isArray(result.suggestions)
+                  ? result.suggestions.map((s) => sanitize(s))
+                  : result.suggestions,
                 model: result.model
-              });
+              };
+              await clueStore.addQa(gameKey, qaEntry);
             } catch (_) {
-              /* 问答持久化失败不影响答疑结果响应 */
+              /* 存储问答失败不破坏 AI_ASK 响应 */
             }
           }
+
           return respond(type, requestId, apiKey, result);
         }
 
@@ -526,7 +523,7 @@ export function createMessageRouter(deps) {
             try {
               await injectReadersIntoOpenTabs();
             } catch (_) {
-              /* 注入失败不阻断侧栏加载 */
+              /* 注入失败不阻断侧栏就绪流程 */
             }
           }
           const tabInfo = await getActiveTabInfo();

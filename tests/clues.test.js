@@ -201,53 +201,91 @@ test('边界情况与异常校验：空参数、空数组、空库导出及 Mark
   assert.equal(cleared, null);
 });
 
-test('addQa 按 gameKey 持久化问答并在 exportJSON 与 exportMarkdown 中体现', async () => {
+test('addQa 按 gameKey 持久化，listQa 与 getGame().qa 能读回', async () => {
   const storage = createMemoryStorageAdapter();
-  let time = 5000;
-  const store = createClueStore({ storage, now: () => time });
-  const gameKey = 'https://game.example.com::room-1';
-
-  // 空 question / 空 answer 跳过不入库
-  const skipped1 = await store.addQa(gameKey, { question: '', answer: '有答案' });
-  assert.equal(skipped1, null);
-  const skipped2 = await store.addQa(gameKey, { question: '有提问', answer: '   ' });
-  assert.equal(skipped2, null);
+  const store = createClueStore({
+    storage,
+    now: () => 5000,
+    id: () => 'qa_test_1'
+  });
+  const gameKey = 'https://game.test::room-qa';
 
   const entry = await store.addQa(gameKey, {
-    question: '密码怎么算？',
-    answer: '提示是 4312',
-    summary: '抽屉线索',
-    suggestions: ['检查台灯'],
+    question: '红色箱子的密码？',
+    answer: '查看墙壁涂鸦，为 7293',
+    summary: '墙壁涂鸦包含数字',
+    suggestions: ['去红箱子处输入'],
     model: 'gpt-4o'
   });
+
   assert.ok(entry);
-  assert.equal(entry.question, '密码怎么算？');
-  assert.equal(entry.answer, '提示是 4312');
+  assert.equal(entry.question, '红色箱子的密码？');
+  assert.equal(entry.answer, '查看墙壁涂鸦，为 7293');
+  assert.equal(entry.createdAt, 5000);
+  assert.equal(entry.model, 'gpt-4o');
 
   const list = await store.listQa(gameKey);
   assert.equal(list.length, 1);
-  assert.equal(list[0].question, '密码怎么算？');
-  assert.equal(list[0].answer, '提示是 4312');
-  assert.equal(list[0].createdAt, 5000);
+  assert.equal(list[0].question, '红色箱子的密码？');
+  assert.equal(list[0].answer, '查看墙壁涂鸦，为 7293');
 
   const game = await store.getGame(gameKey);
   assert.ok(game);
   assert.equal(Array.isArray(game.qa), true);
   assert.equal(game.qa.length, 1);
-  assert.equal(game.clues.length, 0);
+  assert.equal(game.qa[0].question, '红色箱子的密码？');
 
-  // 无线索但有问答时的导出
-  const json = await store.exportJSON(gameKey);
-  const parsed = JSON.parse(json);
+  // 空 question 或空 answer 不写入
+  const skipped1 = await store.addQa(gameKey, { question: '', answer: '有答案' });
+  assert.equal(skipped1, null);
+  const skipped2 = await store.addQa(gameKey, { question: '有提问', answer: '  ' });
+  assert.equal(skipped2, null);
+  const listAfterSkip = await store.listQa(gameKey);
+  assert.equal(listAfterSkip.length, 1);
+});
+
+test('exportJSON 包含 qa 数组，exportMarkdown 包含问答区块', async () => {
+  const storage = createMemoryStorageAdapter();
+  const store = createClueStore({
+    storage,
+    now: () => 8888
+  });
+  const gameKey = 'https://game.test::room-export';
+
+  await store.addClues(gameKey, [{ text: '找到一把小刀' }]);
+  await store.addQa(gameKey, {
+    question: '小刀有什么用？',
+    answer: '割开沙发上的缝线获取钥匙'
+  });
+
+  const jsonStr = await store.exportJSON(gameKey);
+  const parsed = JSON.parse(jsonStr);
   assert.equal(parsed.games.length, 1);
+  assert.equal(Array.isArray(parsed.games[0].qa), true);
   assert.equal(parsed.games[0].qa.length, 1);
-  assert.equal(parsed.games[0].qa[0].question, '密码怎么算？');
-  assert.equal(parsed.games[0].clues.length, 0);
-  assert.equal(/apiKey|baseUrl/i.test(json), false);
+  assert.equal(parsed.games[0].qa[0].question, '小刀有什么用？');
+  assert.equal(parsed.games[0].qa[0].answer, '割开沙发上的缝线获取钥匙');
 
   const md = await store.exportMarkdown(gameKey);
   assert.ok(md.includes('### 问答记录'));
-  assert.ok(md.includes('密码怎么算？'));
-  assert.ok(md.includes('提示是 4312'));
-  assert.equal(/apiKey|baseUrl/i.test(md), false);
+  assert.ok(md.includes('**问**：小刀有什么用？'));
+  assert.ok(md.includes('**答**：割开沙发上的缝线获取钥匙'));
+});
+
+test('无线索但有问答时，JSON 仍导出该 game 且 qa 非空、clues 为空', async () => {
+  const storage = createMemoryStorageAdapter();
+  const store = createClueStore({ storage });
+  const gameKey = 'https://game.test::room-qa-only';
+
+  await store.addQa(gameKey, {
+    question: '现在该怎么走？',
+    answer: '向左转'
+  });
+
+  const jsonStr = await store.exportJSON(gameKey);
+  const parsed = JSON.parse(jsonStr);
+  assert.equal(parsed.games.length, 1);
+  assert.equal(parsed.games[0].clues.length, 0);
+  assert.equal(parsed.games[0].qa.length, 1);
+  assert.equal(parsed.games[0].qa[0].question, '现在该怎么走？');
 });

@@ -118,82 +118,70 @@ const settingsService = createSettingsService({ storage, permissions: permission
 const clueStore = createClueStore({ storage });
 const aiClient = createAiClient({ http, getSettings: () => settingsService.getSettings() });
 
+// 向已打开且已授权的标签页自动注入 reader-loader
 async function injectReadersIntoOpenTabs(filterOrigin) {
   if (typeof chrome === 'undefined' || !chrome.tabs?.query || !chrome.scripting?.executeScript) {
     return;
   }
-  let settings = null;
   try {
-    settings = await settingsService.getSettings();
-  } catch (err) {
-    return;
-  }
-  const sites = settings && Array.isArray(settings.gameSites) ? settings.gameSites : [];
-  const allowedOrigins = new Set();
-  for (const site of sites) {
-    if (site == null) continue;
-    const raw = typeof site === 'string' ? site : site.origin || site.url;
-    const origin = resolveOrigin(raw);
-    if (origin) allowedOrigins.add(origin);
-  }
-  if (filterOrigin) {
-    const target = resolveOrigin(filterOrigin);
-    if (!allowedOrigins.has(target)) return;
-    allowedOrigins.clear();
-    allowedOrigins.add(target);
-  }
-  if (allowedOrigins.size === 0) return;
+    const settings = await settingsService.getSettings();
+    const sites = settings && Array.isArray(settings.gameSites) ? settings.gameSites : [];
+    const siteOrigins = new Set();
+    for (const site of sites) {
+      if (site == null) continue;
+      const raw = typeof site === 'string' ? site : site.origin || site.url;
+      const orig = resolveOrigin(raw);
+      if (orig) siteOrigins.add(orig);
+    }
 
-  let tabs = [];
-  try {
-    tabs = await chrome.tabs.query({});
-  } catch (err) {
-    return;
-  }
-  if (!Array.isArray(tabs)) return;
+    const tabs = await chrome.tabs.query({});
+    for (const tab of tabs) {
+      if (!tab || tab.id == null || !tab.url) continue;
+      let tabOrigin = '';
+      try {
+        const parsed = new URL(tab.url);
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') continue;
+        tabOrigin = resolveOrigin(parsed.origin);
+      } catch (_) {
+        continue;
+      }
+      if (!tabOrigin) continue;
+      if (filterOrigin && tabOrigin !== resolveOrigin(filterOrigin)) continue;
+      if (!siteOrigins.has(tabOrigin)) continue;
 
-  for (const tab of tabs) {
-    if (!tab || tab.id == null || !tab.url) continue;
-    let urlObj = null;
-    try {
-      urlObj = new URL(tab.url);
-    } catch (err) {
-      continue;
-    }
-    if (urlObj.protocol !== 'http:' && urlObj.protocol !== 'https:') {
-      continue;
-    }
-    const origin = resolveOrigin(urlObj.origin);
-    if (!allowedOrigins.has(origin)) {
-      continue;
-    }
-    try {
-      const granted = await permissionsAdapter.containsOrigin(origin);
+      let granted = false;
+      try {
+        granted = await permissionsAdapter.containsOrigin(tabOrigin);
+      } catch (_) {
+        granted = false;
+      }
       if (!granted) continue;
-      await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        files: ['content/reader-loader.js']
-      });
-    } catch (err) {
-      // 单标签注入失败静默吞掉
+
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          files: ['content/reader-loader.js']
+        });
+      } catch (_) {
+        // 单标签页注入失败吞掉
+      }
     }
+  } catch (_) {
+    // 注入遍历失败吞掉
   }
 }
 
+// 包装 permissionsAdapter.registerReader，在站点注册成功后向打开的标签页补注入
 const originalRegisterReader = permissionsAdapter.registerReader.bind(permissionsAdapter);
 permissionsAdapter.registerReader = async function (origin) {
-  const ok = await originalRegisterReader(origin);
-  if (ok) {
-    try {
-      await injectReadersIntoOpenTabs(origin);
-    } catch (err) {
-      // 触发式注入失败忽略
-    }
+  const result = await originalRegisterReader(origin);
+  if (result) {
+    injectReadersIntoOpenTabs(origin).catch(() => {});
   }
-  return ok;
+  return result;
 };
 
-// 扩展重载/启动后，把已授权站点的 reader 脚本重新注册到最新的注入文件上，并向已打开标签页补注入
+// 扩展重载/启动后，把已授权站点的 reader 脚本重新注册到最新的注入文件上并补注入
 async function reregisterGrantedReaders() {
   try {
     const settings = await settingsService.getSettings();
@@ -215,11 +203,7 @@ async function reregisterGrantedReaders() {
         // 单个站点重注册失败忽略
       }
     }
-    try {
-      await injectReadersIntoOpenTabs();
-    } catch (err) {
-      // 启动注入失败忽略
-    }
+    await injectReadersIntoOpenTabs();
   } catch (err) {
     // 重注册整体失败忽略
   }
@@ -249,6 +233,7 @@ const router = createMessageRouter({
   aiClient,
   screenshotThrottleMap,
   now: Date.now,
+  injectReadersIntoOpenTabs,
   async getActiveTab() {
     if (typeof chrome === 'undefined' || !chrome?.tabs?.query) return null;
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
@@ -285,7 +270,6 @@ const router = createMessageRouter({
     if (typeof chrome === 'undefined' || !chrome?.tabs?.sendMessage) return null;
     return await chrome.tabs.sendMessage(tabId, message);
   },
-  injectReadersIntoOpenTabs,
   broadcast(msg) {
     if (typeof chrome === 'undefined') return;
     if (!chrome?.runtime?.sendMessage) return;
