@@ -6,7 +6,9 @@ import {
   shouldCaptureCanvas,
   flushBatch,
   stopReader,
-  startReader
+  startReader,
+  getNumericSlotTrackerSize,
+  NUMERIC_SLOT_TRACKER_LIMIT
 } from '../content/reader.js';
 
 function createNode(tagOrType, attrs = {}) {
@@ -109,7 +111,11 @@ test('computeDelta: 前缀增量、包含子串、无新增及边界测试', () 
   // 2. 包含子串（前缀有些许偏移但包含完整旧文本）
   assert.equal(
     computeDelta('第二章', '目录 第一章 第二章 序幕拉开'),
-    '序幕拉开'
+    '目录 第一章 序幕拉开'
+  );
+
+  assert.ok(
+    computeDelta('旧消息一。旧消息二。', '新提示：去 3 楼。旧消息一。旧消息二。').includes('新提示：去 3 楼')
   );
 
   // 3. 无新增返回空字符串
@@ -206,6 +212,21 @@ test('发送路径零调用测试：仅计时器数字或插件 UI 变化不得�
   const sentMessages = [];
   const originalChrome = globalThis.chrome;
   const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  let fakeNow = 10000;
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
 
   globalThis.document = mockDoc;
   globalThis.chrome = {
@@ -220,34 +241,41 @@ test('发送路径零调用测试：仅计时器数字或插件 UI 变化不得�
   };
 
   try {
-    // 第一次冲刷：初始有正文，应发送 1 次初始增量
-    flushBatch(true);
-    assert.equal(sentMessages.length, 1);
-    assert.ok(sentMessages[0].payload.text.includes('房间里有一扇门'));
-    assert.ok(!sentMessages[0].payload.text.includes('冷却 5s'));
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
+
+    // startReader 已把当前可见文本写入 previousText，页面未变化时首次 interval 冲刷必须 0 次发送
+    fakeNow += 5000;
+    batchTimer.fn();
+    assert.equal(sentMessages.length, 0, '首次 interval 冲刷不应发送任何消息');
 
     // 仅修改插件自身按钮文案
+    fakeNow += 5000;
     pluginBtnText.nodeValue = '冷却 4s';
-    flushBatch(true);
-    assert.equal(sentMessages.length, 1, '仅插件按钮文案变化时 sendMessage 不得新增调用');
+    batchTimer.fn();
+    assert.equal(sentMessages.length, 0, '仅插件按钮文案变化时 sendMessage 不得新增调用');
 
     // 仅修改游戏内倒计时数字
+    fakeNow += 5000;
     textNode.nodeValue = '房间里有一扇门。剩余时间 01:29';
-    flushBatch(true);
-    assert.equal(sentMessages.length, 1, '仅游戏计时器数字变化时 sendMessage 不得新增调用');
+    batchTimer.fn();
+    assert.equal(sentMessages.length, 0, '仅游戏计时器数字变化时 sendMessage 不得新增调用');
 
     // 当追加真正的新游戏文本时应触发发送
     const newParagraph = createNode('p');
     newParagraph.appendChild(createTextNode('墙上出现密码 4312'));
     body.appendChild(newParagraph);
-    flushBatch(true);
+    fakeNow += 5000;
+    batchTimer.fn();
 
-    assert.equal(sentMessages.length, 2, '追加有意义新文本后应触发发送');
-    const latestPayload = sentMessages[1].payload.text;
+    assert.equal(sentMessages.length, 1, '追加有意义新文本后应触发发送');
+    const latestPayload = sentMessages[0].payload.text;
     assert.ok(latestPayload.includes('墙上出现密码 4312'));
     assert.ok(!latestPayload.includes('冷却'));
   } finally {
     stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
     if (originalChrome === undefined) {
       delete globalThis.chrome;
     } else {
@@ -359,6 +387,20 @@ test('规则验证 1 & 2: 页面新增密码发送，倒计时格式变动/停�
   const sentMessages = [];
   const originalChrome = globalThis.chrome;
   const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
 
   globalThis.chrome = {
     runtime: {
@@ -379,34 +421,38 @@ test('规则验证 1 & 2: 页面新增密码发送，倒计时格式变动/停�
   globalThis.document = mockDoc;
 
   try {
-    startReader({ now: () => fakeNow });
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
 
-    // startReader 后页面未变，首次 flush 不发送
-    flushBatch(true);
+    // startReader 后页面未变，首次 tick 不发送
+    fakeNow += 5000;
+    batchTimer.fn();
     assert.equal(sentMessages.length, 0);
 
     // 2. 仅「冷却 5s」->「冷却 4s」-> 零新增发送
-    fakeNow += 1000;
+    fakeNow += 5000;
     timerNode.nodeValue = '冷却 4s';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 0);
 
-    // 冻结倒计时停住超过 5 秒再 flush，也不得补发终值
+    // 冻结倒计时停住超过 5 秒再 tick，也不得补发终值
     fakeNow += 6000;
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 0, '冻结的倒计时不得补发终值');
 
     // 1. 页面新增「密码是 4271」-> send 次数增加且含 4271
     const pPassword = createNode('p');
     pPassword.appendChild(createTextNode('密码是 4271'));
     body.appendChild(pPassword);
-    fakeNow += 1000;
-    flushBatch(true);
+    fakeNow += 5000;
+    batchTimer.fn();
 
     assert.equal(sentMessages.length, 1);
     assert.ok(sentMessages[0].payload.text.includes('4271'));
   } finally {
     stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
     if (originalChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = originalChrome;
     if (originalDocument === undefined) delete globalThis.document;
@@ -421,6 +467,20 @@ test('规则验证 3: 保险箱密码单次变化必须发送并包含新值', (
   const sentMessages = [];
   const originalChrome = globalThis.chrome;
   const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
 
   globalThis.chrome = {
     runtime: {
@@ -441,21 +501,25 @@ test('规则验证 3: 保险箱密码单次变化必须发送并包含新值', (
   globalThis.document = mockDoc;
 
   try {
-    startReader({ now: () => fakeNow });
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
 
-    // startReader 后页面未变，首次 flush 不发送
-    flushBatch(true);
+    // startReader 后页面未变，首次 tick 不发送
+    fakeNow += 5000;
+    batchTimer.fn();
     assert.equal(sentMessages.length, 0);
 
     // 改成 9035
-    fakeNow += 1000;
+    fakeNow += 5000;
     textNode.nodeValue = '保险箱密码 9035';
-    flushBatch(true);
+    batchTimer.fn();
 
     assert.equal(sentMessages.length, 1, '保险箱密码单次变化应发送');
     assert.ok(sentMessages[0].payload.text.includes('9035'));
   } finally {
     stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
     if (originalChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = originalChrome;
     if (originalDocument === undefined) delete globalThis.document;
@@ -470,6 +534,20 @@ test('规则验证 4: 分数首次同位变化发送，快速3次变化判定跳
   const sentMessages = [];
   const originalChrome = globalThis.chrome;
   const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
 
   globalThis.chrome = {
     runtime: {
@@ -490,39 +568,43 @@ test('规则验证 4: 分数首次同位变化发送，快速3次变化判定跳
   globalThis.document = mockDoc;
 
   try {
-    startReader({ now: () => fakeNow });
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
 
-    // startReader 后页面未变，首次 flush 不发送
-    flushBatch(true);
+    // startReader 后页面未变，首次 tick 不发送
+    fakeNow += 5000;
+    batchTimer.fn();
     assert.equal(sentMessages.length, 0);
 
     // 第一次变化：100 -> 105，必须发送
-    fakeNow += 1000;
+    fakeNow += 5000;
     scoreText.nodeValue = '分数 105';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 1);
     assert.ok(sentMessages[0].payload.text.includes('105'));
 
     // 第二次变化：105 -> 110，30s内第二次，发送
-    fakeNow += 1000;
+    fakeNow += 5000;
     scoreText.nodeValue = '分数 110';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 2);
     assert.ok(sentMessages[1].payload.text.includes('110'));
 
     // 第三次变化：110 -> 115，达到3次判定跳动，停止发送
-    fakeNow += 1000;
+    fakeNow += 5000;
     scoreText.nodeValue = '分数 115';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 2, '第3次同位变化判定跳动，不再发送');
 
     // 第四次变化：115 -> 120，继续抑制
-    fakeNow += 1000;
+    fakeNow += 5000;
     scoreText.nodeValue = '分数 120';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 2, '跳动状态下继续抑制');
   } finally {
     stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
     if (originalChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = originalChrome;
     if (originalDocument === undefined) delete globalThis.document;
@@ -537,6 +619,20 @@ test('规则验证 5: 跳动数字停止变化 >5 秒后补发终值，倒计时
   const sentMessages = [];
   const originalChrome = globalThis.chrome;
   const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
 
   globalThis.chrome = {
     runtime: {
@@ -557,52 +653,193 @@ test('规则验证 5: 跳动数字停止变化 >5 秒后补发终值，倒计时
   globalThis.document = mockDoc;
 
   try {
-    startReader({ now: () => fakeNow });
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
 
-    // startReader 后页面未变，首次 flush 不发送
-    flushBatch(true);
+    // startReader 后页面未变，首次 tick 不发送
+    fakeNow += 5000;
+    batchTimer.fn();
     assert.equal(sentMessages.length, 0);
 
     // 快速转动密码锁：1 -> 2 (变动1), 2 -> 3 (变动2), 3 -> 9 (变动3: 判跳动)
-    fakeNow += 500;
+    fakeNow += 1000;
     lockText.nodeValue = '转盘密码 2';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 1);
 
-    fakeNow += 500;
+    fakeNow += 1000;
     lockText.nodeValue = '转盘密码 3';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 2);
 
-    fakeNow += 500;
+    fakeNow += 1000;
     lockText.nodeValue = '转盘密码 9';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 2, '第3次被判定跳动抑制');
 
     // 保持在 9，推进 4000ms（未超 5000ms），不补发
     fakeNow += 4000;
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 2);
 
-    // 推进到累计超 5000ms (比如再加 1500ms，总间隔 5500ms > 5000ms)
-    fakeNow += 1500;
-    flushBatch(true);
+    // 推进到累计超 5000ms (再加 2000ms，总间隔 6000ms > 5000ms)
+    fakeNow += 2000;
+    batchTimer.fn();
     assert.equal(sentMessages.length, 3, '稳定 >5 秒后补发终值');
     assert.ok(sentMessages[2].payload.text.includes('9'));
+    assert.equal(sentMessages[2].payload.text, '转盘密码 9');
 
     // 补发后再过 6 秒，不能重复补发
     fakeNow += 6000;
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 3, '终值补发后不得重复补发');
 
     // 补发后若单次再改到新值，按“第一次变化”处理，仍能发送
-    fakeNow += 1000;
+    fakeNow += 5000;
     lockText.nodeValue = '转盘密码 8';
-    flushBatch(true);
+    batchTimer.fn();
     assert.equal(sentMessages.length, 4, '清空跳动状态后单次新值可正常发送');
     assert.ok(sentMessages[3].payload.text.includes('8'));
   } finally {
     stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('场景验证：同时存在 mm:ss 计时与密码，时钟长跑零发送，密码变化单次发送', () => {
+  stopReader();
+
+  let fakeNow = 10000;
+  const sentMessages = [];
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
+
+  globalThis.chrome = {
+    runtime: {
+      sendMessage(msg, cb) {
+        sentMessages.push(msg);
+        if (typeof cb === 'function') cb();
+      }
+    }
+  };
+
+  const body = createNode('body');
+  const timerP = createNode('p');
+  const timerText = createTextNode('剩余 00:59 保险箱密码 4721');
+  timerP.appendChild(timerText);
+  body.appendChild(timerP);
+
+  const mockDoc = createDocStub(body);
+  globalThis.document = mockDoc;
+
+  try {
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
+
+    // 启动初始 tick，文本基准确立
+    fakeNow += 5000;
+    batchTimer.fn();
+    assert.equal(sentMessages.length, 0);
+
+    // 时钟连续走 6 次（跨度 30s）
+    for (let i = 58; i >= 53; i--) {
+      fakeNow += 5000;
+      timerText.nodeValue = `剩余 00:${i} 保险箱密码 4721`;
+      batchTimer.fn();
+    }
+    assert.equal(sentMessages.length, 0, '时钟连续倒计时变化不得触发发送');
+
+    // 随后将密码改为 9035
+    fakeNow += 5000;
+    timerText.nodeValue = '剩余 00:52 保险箱密码 9035';
+    batchTimer.fn();
+
+    assert.equal(sentMessages.length, 1, '密码修改后恰好发送 1 次');
+    assert.ok(sentMessages[0].payload.text.includes('9035'));
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('容量验证：大量不同局部句子数字变化触发追踪器 LRU 上限限制', () => {
+  stopReader();
+
+  let fakeNow = 10000;
+  const sentMessages = [];
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
+
+  globalThis.chrome = {
+    runtime: {
+      sendMessage(msg, cb) {
+        sentMessages.push(msg);
+        if (typeof cb === 'function') cb();
+      }
+    }
+  };
+
+  const body = createNode('body');
+  const mockDoc = createDocStub(body);
+  globalThis.document = mockDoc;
+
+  try {
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
+
+    // 连续生成并变动超过 250 个不同句子/位置
+    for (let i = 0; i < 250; i++) {
+      const p = createNode('p');
+      p.appendChild(createTextNode(`任务编号${i}：当前数值 ${i}`));
+      body.appendChild(p);
+
+      fakeNow += 100;
+      batchTimer.fn();
+    }
+
+    assert.ok(getNumericSlotTrackerSize() <= NUMERIC_SLOT_TRACKER_LIMIT);
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
     if (originalChrome === undefined) delete globalThis.chrome;
     else globalThis.chrome = originalChrome;
     if (originalDocument === undefined) delete globalThis.document;

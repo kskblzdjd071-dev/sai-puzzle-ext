@@ -31,17 +31,45 @@ let isListenerRegistered = false;
 // 注入时钟支持（测试与文本稳定检测）
 let getNow = () => Date.now();
 
-// 跟踪同一文本骨架中各数字 slot 的变动历史
+export const NUMERIC_SLOT_TRACKER_LIMIT = 200;
+
+// 跟踪局部骨架中各非计时数字 slot 的变动历史
 // slotKey -> {
-//   skeleton: string,
-//   slotIndex: number,
+//   slotKey: string,
 //   lastVal: string,
 //   changeTimes: number[],
 //   isJumping: boolean,
 //   lastChangeAt: number,
-//   finalEmitted: boolean
+//   lastAccess: number,
+//   finalEmitted: boolean,
+//   sentenceSkeleton: string,
+//   slotIndexInSentence: number
 // }
 let slotTracker = new Map();
+
+export function getNumericSlotTrackerSize() {
+  return slotTracker.size;
+}
+
+function pruneSlotTracker(now) {
+  // 丢弃超过 60s 既无更新也无访问的过期条目
+  for (const [key, record] of slotTracker.entries()) {
+    const lastActive = Math.max(record.lastChangeAt || 0, record.lastAccess || 0);
+    if (now - lastActive > 60000 && !record.isJumping) {
+      slotTracker.delete(key);
+    }
+  }
+
+  // 若仍超出容量，按 lastAccess 升序（最久未访问）淘汰
+  if (slotTracker.size > NUMERIC_SLOT_TRACKER_LIMIT) {
+    const entries = Array.from(slotTracker.entries());
+    entries.sort((a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0));
+    const excess = slotTracker.size - NUMERIC_SLOT_TRACKER_LIMIT;
+    for (let i = 0; i < excess; i++) {
+      slotTracker.delete(entries[i][0]);
+    }
+  }
+}
 
 function safeGetDoc() {
   return typeof document !== 'undefined' ? document : null;
@@ -146,26 +174,69 @@ export function collectVisibleText(doc = safeGetDoc()) {
   return texts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
+const TEMPORAL_REGEXES = [
+  /(?:剩余|剩余时间|倒计时|冷却)?\s*\b\d{1,2}:\d{2}(?::\d{2})?\b/gi,
+  /(?:剩余|剩余时间|冷却)?\s*\d+(?:\.\d+)?\s*(?:秒|s|sec|seconds?)\b/gi,
+  /倒计时\s*\d+/gi
+];
+
 // 归一化明确的计时/倒计时/时钟格式
 function normalizeTemporalTokens(str) {
   if (!str) return '';
-  return str
-    .replace(/(?:剩余|剩余时间|倒计时|冷却)?\s*\b\d{1,2}:\d{2}(?::\d{2})?\b/gi, '__TIME__')
-    .replace(/(?:剩余|剩余时间|冷却)?\s*\d+(?:\.\d+)?\s*(?:秒|s|sec|seconds?)\b/gi, '__TIME__')
-    .replace(/倒计时\s*\d+/gi, '__TIME__')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let res = str;
+  for (const reg of TEMPORAL_REGEXES) {
+    res = res.replace(reg, '__TIME__');
+  }
+  return res.replace(/\s+/g, ' ').trim();
 }
 
-// 提取文本中的数字 token 以及剥离数字后的骨架
-function extractNumericSlots(str) {
-  const tokens = [];
-  let tokenIndex = 0;
-  const skeleton = str.replace(/\d+/g, (match) => {
-    tokens.push({ val: match, index: tokenIndex++ });
-    return '__NUM_SLOT__';
-  });
-  return { skeleton, tokens };
+// 先将计时类 token 屏蔽为固定占位，避免进入数字槽位提取与跳动检测
+function maskTemporalTokens(str) {
+  if (!str) return '';
+  let res = str;
+  for (const reg of TEMPORAL_REGEXES) {
+    res = res.replace(reg, '__TIME__');
+  }
+  return res;
+}
+
+// 将文本拆分为局部句子/片段，保持稳定上下文
+function splitIntoSentences(text) {
+  if (!text) return [];
+  return text.split(/(?<=[。！？\n])|(?<=[.!?])\s+/).map(s => s.trim()).filter(Boolean);
+}
+
+// 提取文本中的局部非计时数字 slot 信息
+// 结构：{ key, sentenceSkeleton, slotIndexInSentence, val, sentence }
+function extractLocalNumericSlots(text) {
+  const sentences = splitIntoSentences(text);
+  const slots = [];
+
+  for (const sentence of sentences) {
+    // 先遮蔽计时/时钟数字
+    const maskedSentence = maskTemporalTokens(sentence);
+    let indexInSentence = 0;
+    const sentenceSkeleton = maskedSentence.replace(/\b\d+\b/g, () => `__NUM_SLOT__`);
+
+    // 针对原始非计时数字抽取 token
+    let match;
+    const numRegex = /\b\d+\b/g;
+    // 在 maskedSentence 寻找非 __TIME__ 内部的数字
+    while ((match = numRegex.exec(maskedSentence)) !== null) {
+      const val = match[0];
+      const slotIndex = indexInSentence++;
+      const key = `${sentenceSkeleton}:::slot_${slotIndex}`;
+      slots.push({
+        key,
+        sentenceSkeleton,
+        slotIndexInSentence: slotIndex,
+        val,
+        sentence
+      });
+    }
+  }
+
+  return slots;
 }
 
 export function computeDelta(prev, next) {
@@ -188,8 +259,12 @@ export function computeDelta(prev, next) {
 
   const idx = n.indexOf(p);
   if (idx !== -1) {
-    const tail = n.slice(idx + p.length).replace(/\s+/g, ' ').trim();
-    return tail;
+    const prefix = n.slice(0, idx).replace(/\s+/g, ' ').trim();
+    const suffix = n.slice(idx + p.length).replace(/\s+/g, ' ').trim();
+    const parts = [];
+    if (prefix) parts.push(prefix);
+    if (suffix) parts.push(suffix);
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
   }
 
   const prevParts = p.split(/(?<=[。！？.!?\n])\s*/).filter(Boolean);
@@ -209,9 +284,11 @@ export function computeDelta(prev, next) {
   const result = diffParts.join('\n').replace(/[ \t]+/g, ' ').trim();
   if (!result || result === p) {
     // 骨架等价但非计时数字发生单次同位变化时的保全（如「保险箱密码 4721」->「保险箱密码 9035」）
-    const pSlots = extractNumericSlots(p);
-    const nSlots = extractNumericSlots(n);
-    if (pSlots.skeleton === nSlots.skeleton && pSlots.tokens.length === nSlots.tokens.length) {
+    const pMasked = maskTemporalTokens(p);
+    const nMasked = maskTemporalTokens(n);
+    const pSkel = pMasked.replace(/\b\d+\b/g, '__NUM__');
+    const nSkel = nMasked.replace(/\b\d+\b/g, '__NUM__');
+    if (pSkel === nSkel && pMasked !== nMasked) {
       return n;
     }
     return '';
@@ -441,88 +518,161 @@ export function requestScreenshot(reason) {
 }
 
 export function flushBatch(force = true) {
-  if (!force && !isDomDirty) {
-    return;
-  }
-  isDomDirty = false;
-
   const now = getNow();
   const doc = safeGetDoc();
   const next = collectVisibleText(doc);
   const prev = previousText;
 
-  // 1. 检测同位数字变化与跳动状态
-  const pNormTime = normalizeTemporalTokens(prev);
-  const nNormTime = normalizeTemporalTokens(next);
-  const isPureTemporalChange = prev !== next && pNormTime === nNormTime;
+  isDomDirty = false;
 
-  let shouldSuppressDueToJumping = false;
-  let stabilizedFinalToSend = null;
+  // 1. 抽取基于稳定局部上下文的非计时数字槽位
+  const pLocalSlots = extractLocalNumericSlots(prev);
+  const nLocalSlots = extractLocalNumericSlots(next);
 
-  const pSlots = extractNumericSlots(prev);
-  const nSlots = extractNumericSlots(next);
-  const isSameSkeleton = pSlots.skeleton.length > 0 && pSlots.skeleton === nSlots.skeleton && pSlots.tokens.length === nSlots.tokens.length;
+  const prevSlotMap = new Map();
+  for (const s of pLocalSlots) {
+    prevSlotMap.set(s.key, s);
+  }
 
-  if (isSameSkeleton) {
-    for (let i = 0; i < nSlots.tokens.length; i++) {
-      const pVal = pSlots.tokens[i].val;
-      const nVal = nSlots.tokens[i].val;
-      const slotKey = `${nSlots.skeleton}:::slot_${i}`;
-      let record = slotTracker.get(slotKey);
+  // 记录跳动位置的集合与本次用于遮罩的替换映射
+  const jumpingMaskMap = new Map(); // key -> lastAcceptedVal
+  const jumpingKeysThisRound = new Set();
+  const stabilizedSentencesToEmit = [];
 
-      if (!record) {
-        record = {
-          lastVal: pVal,
-          changeTimes: [],
-          isJumping: false,
-          lastChangeAt: now,
-          finalEmitted: false
-        };
-        slotTracker.set(slotKey, record);
-      }
+  for (const nSlot of nLocalSlots) {
+    const key = nSlot.key;
+    const pSlot = prevSlotMap.get(key);
+    let record = slotTracker.get(key);
 
-      if (pVal !== nVal) {
-        // 发生了同位数值变化
-        record.lastVal = nVal;
-        record.lastChangeAt = now;
-        record.finalEmitted = false;
+    if (!record) {
+      record = {
+        slotKey: key,
+        lastVal: pSlot ? pSlot.val : nSlot.val,
+        changeTimes: [],
+        isJumping: false,
+        lastChangeAt: now,
+        lastAccess: now,
+        finalEmitted: false,
+        sentenceSkeleton: nSlot.sentenceSkeleton,
+        slotIndexInSentence: nSlot.slotIndexInSentence,
+        lastAcceptedVal: pSlot ? pSlot.val : nSlot.val
+      };
+      slotTracker.set(key, record);
+    }
 
-        // 30 秒滑动窗口
-        record.changeTimes = record.changeTimes.filter(t => now - t <= 30000);
-        record.changeTimes.push(now);
+    record.lastAccess = now;
 
-        if (record.changeTimes.length >= 3) {
-          record.isJumping = true;
-          // 第 3 次及以上进入跳动抑制
-          shouldSuppressDueToJumping = true;
-        }
+    const currentVal = nSlot.val;
+    const hadChanged = record.lastVal !== currentVal;
+
+    if (hadChanged) {
+      record.lastVal = currentVal;
+      record.lastChangeAt = now;
+      record.finalEmitted = false;
+
+      // 30 秒滑动窗口
+      record.changeTimes = record.changeTimes.filter(t => now - t <= 30000);
+      record.changeTimes.push(now);
+
+      if (record.changeTimes.length >= 3) {
+        record.isJumping = true;
       } else {
-        // 同位数值未变：检查是否曾经判定跳动且 >5000ms 稳定
-        if (record.isJumping && !record.finalEmitted && !isPureTemporalChange && /\d/.test(nNormTime)) {
-          if (now - record.lastChangeAt > 5000) {
-            stabilizedFinalToSend = next;
-            record.finalEmitted = true;
-            // 发送后清空该位置跳动状态
-            slotTracker.delete(slotKey);
-          }
-        }
+        // 第 1、2 次变动正常接受
+        record.lastAcceptedVal = currentVal;
+      }
+    }
+
+    if (record.isJumping) {
+      if (hadChanged) {
+        jumpingKeysThisRound.add(key);
+      }
+      jumpingMaskMap.set(key, record.lastAcceptedVal || '__JUMPING__');
+
+      // 检查跳动已停且稳定 >5000ms（注意：计时数字已被排除在 slots 之外，无须担心误判）
+      if (!record.finalEmitted && now - record.lastChangeAt > 5000) {
+        stabilizedSentencesToEmit.push(nSlot.sentence);
+        record.finalEmitted = true;
+        record.isJumping = false;
+        record.lastAcceptedVal = currentVal;
+        slotTracker.delete(key);
       }
     }
   }
 
-  // 2. 计算增量并决定是否发送
-  let delta = computeDelta(prev, next);
-
-  if (delta.length > 0) {
-    if (shouldSuppressDueToJumping) {
-      // 被判定为跳动值，抑制发送
-      delta = '';
+  // 同时也对不在当前 nextLocalSlots 中但在上一轮或之前存在且仍处于跳动状态的槽位检查稳定补发
+  for (const [key, record] of slotTracker.entries()) {
+    if (record.isJumping && !record.finalEmitted && now - record.lastChangeAt > 5000) {
+      // 若当前 DOM 文本中依然能找到该句子骨架，尝试补发
+      if (next.includes(record.lastVal)) {
+        stabilizedSentencesToEmit.push(record.lastVal);
+      }
+      record.finalEmitted = true;
+      record.isJumping = false;
+      slotTracker.delete(key);
     }
   }
 
-  // 若存在稳定后的终值需补发
-  if (!delta && stabilizedFinalToSend) {
-    delta = stabilizedFinalToSend;
+  pruneSlotTracker(now);
+
+  // 2. 对已判定跳动的位置，在 computeDelta 之前把 prev 和 next 里该位置的数字都替换成 lastAcceptedVal
+  function maskJumpingSlotsInText(targetText, activeJumpingKeys) {
+    if (!targetText || activeJumpingKeys.size === 0) return targetText;
+    const sentences = splitIntoSentences(targetText);
+    const transformed = sentences.map(sentence => {
+      const masked = maskTemporalTokens(sentence);
+      let indexInSentence = 0;
+      const sentenceSkeleton = masked.replace(/\b\d+\b/g, () => `__NUM_SLOT__`);
+
+      // 在 masked (计时 token 已变为 __TIME__) 基础上替换普通数字 slot
+      const replacedMasked = masked.replace(/\b\d+\b/g, (m) => {
+        const slotIdx = indexInSentence++;
+        const key = `${sentenceSkeleton}:::slot_${slotIdx}`;
+        if (activeJumpingKeys.has(key)) {
+          return jumpingMaskMap.get(key) || m;
+        }
+        return m;
+      });
+
+      // 还原 __TIME__ 标记为原始句子对应位置的计时字面量
+      const temporalMatches = [];
+      for (const regex of TEMPORAL_REGEXES) {
+        regex.lastIndex = 0;
+        let match;
+        while ((match = regex.exec(sentence)) !== null) {
+          temporalMatches.push({
+            start: match.index,
+            text: match[0]
+          });
+        }
+      }
+      temporalMatches.sort((a, b) => a.start - b.start);
+      let tIdx = 0;
+      return replacedMasked.replace(/__TIME__/g, () => {
+        if (tIdx < temporalMatches.length) {
+          return temporalMatches[tIdx++].text;
+        }
+        return '__TIME__';
+      });
+    });
+    return transformed.join(' ');
+  }
+
+  const allJumpingKeys = new Set(jumpingMaskMap.keys());
+  let effectivePrev = prev;
+  let effectiveNext = next;
+
+  if (allJumpingKeys.size > 0) {
+    effectivePrev = maskJumpingSlotsInText(prev, allJumpingKeys);
+    effectiveNext = maskJumpingSlotsInText(next, allJumpingKeys);
+  }
+
+  // 3. 计算增量并决定是否发送
+  let delta = computeDelta(effectivePrev, effectiveNext);
+
+  // 若增量为空但存在跳动稳定后的终值片段，补发该句子
+  if (!delta && stabilizedSentencesToEmit.length > 0) {
+    const uniqueSentences = Array.from(new Set(stabilizedSentencesToEmit));
+    delta = uniqueSentences.join('\n').trim();
   }
 
   if (delta.length > 0) {
