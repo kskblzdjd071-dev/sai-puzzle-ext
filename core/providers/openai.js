@@ -152,7 +152,7 @@ export const openaiAdapter = {
     if (res.status < 200 || res.status >= 300) {
       let errMsg = `OpenAI 接口调用失败 (HTTP ${res.status})`;
       if (res.json && res.json.error && res.json.error.message) {
-        errMsg = `OpenAI 接口错误: ${res.json.error.message}`;
+        errMsg = `OpenAI 接口错误: ${res.json.error.message} (HTTP ${res.status})`;
       } else if (res.text) {
         assertNoSecretInText(res.text, apiKey);
       }
