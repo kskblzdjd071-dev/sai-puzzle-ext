@@ -23,12 +23,12 @@ export function sanitizeSecretText(text, apiKey) {
     return text || '';
   }
   let sanitized = text;
-  if (apiKey && typeof apiKey === 'string' && apiKey.trim().length > 0) {
+  if (apiKey && typeof apiKey === 'string' && apiKey.trim().length >= 16) {
     sanitized = sanitized.replaceAll(apiKey, '***');
   }
   return sanitized
-    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '***')
-    .replace(/AIza[A-Za-z0-9_-]{8,}/g, '***');
+    .replace(/(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}/g, '***')
+    .replace(/(?<![A-Za-z0-9])AIza[A-Za-z0-9_-]{16,}/g, '***');
 }
 
 export function dedupeKey(clue) {

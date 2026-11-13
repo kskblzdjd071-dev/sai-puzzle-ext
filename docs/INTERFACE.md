@@ -388,12 +388,12 @@ export interface ExtensionResponse<T = any> {
   - `startReader(config)` 挂载 `MutationObserver` 监听 `document.body` 的 `childList` 与 `characterData` 变动。支持在 `config.now` 注入假时钟函数以供可测性验证。
   - 启动周期为 `batchIntervalMs`（默认 5000ms）的 `setInterval` 冲刷器。每次定时冲刷均重新采集当前可见文本，在页面静止时亦检查跳动停止且稳定超过 5000ms 的位置并触发补发。
   - **局部骨架槽位跟踪与容量限制**：
-    - 位置 key 基于局部稳定上下文（所在句子/行骨架 + 行内序号），避免新聊天行或页眉变动影响历史数字位置。
-    - 跟踪表容量上限为 `NUMERIC_SLOT_TRACKER_LIMIT = 200`，提供 `getNumericSlotTrackerSize()` 供监控，超出或过期条目按 LRU/最近活跃度淘汰。
-  - **同位数字跳动判定与终值补发规则**：
+    - 位置 key 基于局部稳定上下文（所在句子骨架 + occ_ 序号 + slot_ 槽位序号，`${skeleton}:::occ_${occurrenceIndex}:::slot_${slotIndex}`），仅对相对上一轮发生同位数值变化的位置建立跟踪记录。
+    - 跟踪表容量上限为 `NUMERIC_SLOT_TRACKER_LIMIT = 200`，提供 `getNumericSlotTrackerSize()` 供监控。超出容量或过期淘汰时优先清理从未变动的记录，且绝不淘汰跳动中（`isJumping`）的记录。
+  - **同位数字跳动判定、原文发送与终值补发规则**：
     - 在约 30 秒窗口内，同一位置的第 1 次与第 2 次变化正常视作新增内容发送。
-    - 当该位置在 30 秒窗口内发生第 3 次及以上变动时判定为“跳动”，仅遮罩该位置数值（使用上次已接受值或占位替换后重新比对），严禁清空整次 delta；页面其他有效密码或文字变动依然照常输出。
-    - 被判定为跳动的位置，若随后超过 5 秒（严格大于 5000ms）不再变动，则在冲刷时恰好补发一次终值所在的句子/片段，补发后清除跳动状态。
+    - 当该位置在 30 秒窗口内发生第 3 次及以上变动时判定为“跳动”，仅遮罩该位置数值用于判断有无新内容。**发送的 payload.text 严格来自原文**，禁止发送遮罩占位符或改写后的文字。
+    - 被判定为跳动的位置，若随后超过 5 秒（严格大于 5000ms）不再变动，则在冲刷时将终值原句并入本次待发送文本（去重合并），即使本轮已有其他 delta 文本也合并在同一次发送中补发，补发后清除跳动状态。
     - 明确的倒计时与时钟等计时类数字永不进入位置跟踪与补发流程。
   - `stopReader()` 负责清理监听器、定时器、浮动按钮以及清空跳动状态跟踪表，并将时钟恢复为系统默认。
 - **Canvas 视觉侦测**：
@@ -426,7 +426,8 @@ export interface ExtensionResponse<T = any> {
   - `dedupeKey(clue: { text: string }): string`：执行规范化——去除首尾空白字符、内部连续空白合并为单空格、英文字符全部转为小写。对规范化结果计算轻量哈希或直接作为键。
   - 在向存储写入 `addClues` 时，拉取当前游戏已有线索池，命中相同 `dedupeKey` 的线索直接剔除，仅入库并返回新增线索。
 - **敏感信息脱敏**：
-  - 在线索入库（`addClues`）及归档导出（`exportJSON` / `exportMarkdown`）前，必须将文本中的已配置 API Key 及明显形态密钥（如 `sk-...`、`AIza...`）彻底替换为字面量 `***`。去重操作应基于脱敏后的文本执行。
+  - 在线索入库（`addClues`）及归档导出（`exportJSON` / `exportMarkdown`）前，通过 `sanitizeSecretText` 将文本中的已配置 API Key 及明显形态密钥（`sk-` / `AIza`）彻底替换为字面量 `***`。去重操作应基于脱敏后的文本执行。
+  - 脱敏规则强化词边界判定（非单词内部匹配，如 `task-management01`、`risk-assessment` 保留原词），密钥最小长度要求至少 16 位；配置的 `apiKey` 做字面替换前其 trim 长度必须 ≥16，短于 16 位不做替换。
 - **问答存储与导出规格**：
   - 支持 `addQa(gameKey, entry)` 与 `listQa(gameKey)`：问答按游戏主键持久化入 GameRecord.qa 列表，包含问题、回答与时间戳。
   - `exportJSON(gameKey)`：导出标准 JSON 字符串，顶层包含元信息（导出时间戳、插件版本、游戏列表、线索详情与问答记录 qa）。输出前必须进行深度遍历，若发现任何键名为 `apiKey`、`baseUrl` 的字段，强制抛出异常阻断导出。

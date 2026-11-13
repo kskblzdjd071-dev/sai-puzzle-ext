@@ -8,7 +8,8 @@ import {
   makeGameKey,
   parseGameKey,
   dedupeKey,
-  createClueStore
+  createClueStore,
+  sanitizeSecretText
 } from '../core/clues.js';
 import { createMemoryStorageAdapter } from '../adapters/storage.js';
 
@@ -357,4 +358,38 @@ test('addClues 与导出自动脱敏配置密钥和 sk- 形态密钥为 ***', as
   assert.equal(legacyMd.includes(configuredKey), false);
   assert.equal(legacyMd.includes(embeddedKey), false);
   assert.ok(legacyMd.includes('***'));
+});
+
+test('sanitizeSecretText 保护普通中划线业务词原样保留', () => {
+  assert.equal(sanitizeSecretText('task-management01'), 'task-management01');
+  assert.equal(sanitizeSecretText('risk-assessment'), 'risk-assessment');
+  assert.equal(sanitizeSecretText('desk-lamp-model-2000'), 'desk-lamp-model-2000');
+});
+
+test('createClueStore 配置短密钥时不把短串替换为 *** 保留正文', async () => {
+  const storage = createMemoryStorageAdapter();
+  const store = createClueStore({
+    storage,
+    getApiKey: () => 'shortkey'
+  });
+  const gameKey = 'https://game.test::shortkey-preserve';
+
+  const added = await store.addClues(gameKey, [
+    {
+      text: 'shortkey inside text',
+      tags: ['clue']
+    }
+  ]);
+
+  assert.equal(added.length, 1);
+  assert.ok(added[0].text.includes('shortkey'));
+
+  const clues = await store.listClues(gameKey);
+  assert.ok(clues[0].text.includes('shortkey'));
+
+  const jsonStr = await store.exportJSON(gameKey);
+  assert.ok(jsonStr.includes('shortkey'));
+
+  const mdStr = await store.exportMarkdown(gameKey);
+  assert.ok(mdStr.includes('shortkey'));
 });

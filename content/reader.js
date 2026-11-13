@@ -52,7 +52,7 @@ export function getNumericSlotTrackerSize() {
 }
 
 function pruneSlotTracker(now) {
-  // 丢弃超过 60s 既无更新也无访问的过期条目
+  // 丢弃超过 60s 既无更新也无访问的过期条目，跳动记录绝不丢弃
   for (const [key, record] of slotTracker.entries()) {
     const lastActive = Math.max(record.lastChangeAt || 0, record.lastAccess || 0);
     if (now - lastActive > 60000 && !record.isJumping) {
@@ -60,13 +60,26 @@ function pruneSlotTracker(now) {
     }
   }
 
-  // 若仍超出容量，按 lastAccess 升序（最久未访问）淘汰
+  // 若仍超出容量，淘汰非跳动记录；绝不淘汰 isJumping 记录
   if (slotTracker.size > NUMERIC_SLOT_TRACKER_LIMIT) {
-    const entries = Array.from(slotTracker.entries());
-    entries.sort((a, b) => (a[1].lastAccess || 0) - (b[1].lastAccess || 0));
+    const nonJumpingEntries = Array.from(slotTracker.entries()).filter(([, r]) => !r.isJumping);
+    nonJumpingEntries.sort((a, b) => {
+      const ra = a[1];
+      const rb = b[1];
+      const aNeverChanged = (ra.changeTimes || []).length === 0;
+      const bNeverChanged = (rb.changeTimes || []).length === 0;
+      if (aNeverChanged !== bNeverChanged) return aNeverChanged ? -1 : 1;
+
+      const aRecent = now - (ra.lastChangeAt || 0) <= 30000 ? 1 : 0;
+      const bRecent = now - (rb.lastChangeAt || 0) <= 30000 ? 1 : 0;
+      if (aRecent !== bRecent) return aRecent - bRecent;
+
+      return (ra.lastAccess || 0) - (rb.lastAccess || 0);
+    });
     const excess = slotTracker.size - NUMERIC_SLOT_TRACKER_LIMIT;
-    for (let i = 0; i < excess; i++) {
-      slotTracker.delete(entries[i][0]);
+    const toDeleteCount = Math.min(excess, nonJumpingEntries.length);
+    for (let i = 0; i < toDeleteCount; i++) {
+      slotTracker.delete(nonJumpingEntries[i][0]);
     }
   }
 }
@@ -207,28 +220,31 @@ function splitIntoSentences(text) {
 }
 
 // 提取文本中的局部非计时数字 slot 信息
-// 结构：{ key, sentenceSkeleton, slotIndexInSentence, val, sentence }
+// 结构：{ key, sentenceSkeleton, occurrenceIndex, slotIndexInSentence, val, sentence }
 function extractLocalNumericSlots(text) {
   const sentences = splitIntoSentences(text);
   const slots = [];
+  const occurrenceMap = new Map();
 
   for (const sentence of sentences) {
     // 先遮蔽计时/时钟数字
     const maskedSentence = maskTemporalTokens(sentence);
-    let indexInSentence = 0;
     const sentenceSkeleton = maskedSentence.replace(/\b\d+\b/g, () => `__NUM_SLOT__`);
+    const occurrenceIndex = occurrenceMap.get(sentenceSkeleton) || 0;
+    occurrenceMap.set(sentenceSkeleton, occurrenceIndex + 1);
 
-    // 针对原始非计时数字抽取 token
+    let indexInSentence = 0;
     let match;
     const numRegex = /\b\d+\b/g;
     // 在 maskedSentence 寻找非 __TIME__ 内部的数字
     while ((match = numRegex.exec(maskedSentence)) !== null) {
       const val = match[0];
       const slotIndex = indexInSentence++;
-      const key = `${sentenceSkeleton}:::slot_${slotIndex}`;
+      const key = `${sentenceSkeleton}:::occ_${occurrenceIndex}:::slot_${slotIndex}`;
       slots.push({
         key,
         sentenceSkeleton,
+        occurrenceIndex,
         slotIndexInSentence: slotIndex,
         val,
         sentence
@@ -534,9 +550,7 @@ export function flushBatch(force = true) {
     prevSlotMap.set(s.key, s);
   }
 
-  // 记录跳动位置的集合与本次用于遮罩的替换映射
   const jumpingMaskMap = new Map(); // key -> lastAcceptedVal
-  const jumpingKeysThisRound = new Set();
   const stabilizedSentencesToEmit = [];
 
   for (const nSlot of nLocalSlots) {
@@ -544,10 +558,15 @@ export function flushBatch(force = true) {
     const pSlot = prevSlotMap.get(key);
     let record = slotTracker.get(key);
 
-    if (!record) {
+    const currentVal = nSlot.val;
+    const baseVal = pSlot ? pSlot.val : currentVal;
+    const hadChangedFromPrev = pSlot ? pSlot.val !== currentVal : false;
+
+    // 只给「相对上一轮发生过数值变化」的位置或已有记录的位置更新
+    if (!record && hadChangedFromPrev) {
       record = {
         slotKey: key,
-        lastVal: pSlot ? pSlot.val : nSlot.val,
+        lastVal: baseVal,
         changeTimes: [],
         isJumping: false,
         lastChangeAt: now,
@@ -555,54 +574,49 @@ export function flushBatch(force = true) {
         finalEmitted: false,
         sentenceSkeleton: nSlot.sentenceSkeleton,
         slotIndexInSentence: nSlot.slotIndexInSentence,
-        lastAcceptedVal: pSlot ? pSlot.val : nSlot.val
+        lastAcceptedVal: baseVal
       };
       slotTracker.set(key, record);
     }
 
-    record.lastAccess = now;
+    if (record) {
+      record.lastAccess = now;
+      const hadChanged = record.lastVal !== currentVal;
 
-    const currentVal = nSlot.val;
-    const hadChanged = record.lastVal !== currentVal;
-
-    if (hadChanged) {
-      record.lastVal = currentVal;
-      record.lastChangeAt = now;
-      record.finalEmitted = false;
-
-      // 30 秒滑动窗口
-      record.changeTimes = record.changeTimes.filter(t => now - t <= 30000);
-      record.changeTimes.push(now);
-
-      if (record.changeTimes.length >= 3) {
-        record.isJumping = true;
-      } else {
-        // 第 1、2 次变动正常接受
-        record.lastAcceptedVal = currentVal;
-      }
-    }
-
-    if (record.isJumping) {
       if (hadChanged) {
-        jumpingKeysThisRound.add(key);
-      }
-      jumpingMaskMap.set(key, record.lastAcceptedVal || '__JUMPING__');
+        record.lastVal = currentVal;
+        record.lastChangeAt = now;
+        record.finalEmitted = false;
 
-      // 检查跳动已停且稳定 >5000ms（注意：计时数字已被排除在 slots 之外，无须担心误判）
-      if (!record.finalEmitted && now - record.lastChangeAt > 5000) {
-        stabilizedSentencesToEmit.push(nSlot.sentence);
-        record.finalEmitted = true;
-        record.isJumping = false;
-        record.lastAcceptedVal = currentVal;
-        slotTracker.delete(key);
+        // 30 秒滑动窗口
+        record.changeTimes = record.changeTimes.filter(t => now - t <= 30000);
+        record.changeTimes.push(now);
+
+        if (record.changeTimes.length >= 3) {
+          record.isJumping = true;
+        } else {
+          record.lastAcceptedVal = currentVal;
+        }
+      }
+
+      if (record.isJumping) {
+        jumpingMaskMap.set(key, record.lastAcceptedVal || '__JUMPING__');
+
+        // 检查跳动已停且稳定 >5000ms
+        if (!record.finalEmitted && now - record.lastChangeAt > 5000) {
+          stabilizedSentencesToEmit.push(nSlot.sentence);
+          record.finalEmitted = true;
+          record.isJumping = false;
+          record.lastAcceptedVal = currentVal;
+          slotTracker.delete(key);
+        }
       }
     }
   }
 
-  // 同时也对不在当前 nextLocalSlots 中但在上一轮或之前存在且仍处于跳动状态的槽位检查稳定补发
+  // 对上一轮或之前存在且仍处于跳动状态但当前不在 nLocalSlots 的槽位检查稳定补发
   for (const [key, record] of slotTracker.entries()) {
     if (record.isJumping && !record.finalEmitted && now - record.lastChangeAt > 5000) {
-      // 若当前 DOM 文本中依然能找到该句子骨架，尝试补发
       if (next.includes(record.lastVal)) {
         stabilizedSentencesToEmit.push(record.lastVal);
       }
@@ -614,26 +628,27 @@ export function flushBatch(force = true) {
 
   pruneSlotTracker(now);
 
-  // 2. 对已判定跳动的位置，在 computeDelta 之前把 prev 和 next 里该位置的数字都替换成 lastAcceptedVal
+  // 2. 遮罩仅用于判断有无新内容。maskJumpingSlotsInText 需与 extractLocalNumericSlots 统一 occ_ 下标
   function maskJumpingSlotsInText(targetText, activeJumpingKeys) {
     if (!targetText || activeJumpingKeys.size === 0) return targetText;
     const sentences = splitIntoSentences(targetText);
+    const occurrenceMap = new Map();
     const transformed = sentences.map(sentence => {
       const masked = maskTemporalTokens(sentence);
-      let indexInSentence = 0;
       const sentenceSkeleton = masked.replace(/\b\d+\b/g, () => `__NUM_SLOT__`);
+      const occurrenceIndex = occurrenceMap.get(sentenceSkeleton) || 0;
+      occurrenceMap.set(sentenceSkeleton, occurrenceIndex + 1);
 
-      // 在 masked (计时 token 已变为 __TIME__) 基础上替换普通数字 slot
+      let indexInSentence = 0;
       const replacedMasked = masked.replace(/\b\d+\b/g, (m) => {
         const slotIdx = indexInSentence++;
-        const key = `${sentenceSkeleton}:::slot_${slotIdx}`;
+        const key = `${sentenceSkeleton}:::occ_${occurrenceIndex}:::slot_${slotIdx}`;
         if (activeJumpingKeys.has(key)) {
           return jumpingMaskMap.get(key) || m;
         }
         return m;
       });
 
-      // 还原 __TIME__ 标记为原始句子对应位置的计时字面量
       const temporalMatches = [];
       for (const regex of TEMPORAL_REGEXES) {
         regex.lastIndex = 0;
@@ -666,16 +681,27 @@ export function flushBatch(force = true) {
     effectiveNext = maskJumpingSlotsInText(next, allJumpingKeys);
   }
 
-  // 3. 计算增量并决定是否发送
-  let delta = computeDelta(effectivePrev, effectiveNext);
+  // 3. 计算增量并决定是否发送。发送的文本必须来自原文，不得发送改写后的文字
+  const maskedDelta = computeDelta(effectivePrev, effectiveNext);
+  const rawDelta = computeDelta(prev, next);
 
-  // 若增量为空但存在跳动稳定后的终值片段，补发该句子
-  if (!delta && stabilizedSentencesToEmit.length > 0) {
-    const uniqueSentences = Array.from(new Set(stabilizedSentencesToEmit));
-    delta = uniqueSentences.join('\n').trim();
+  const payloadParts = [];
+  if (maskedDelta.length > 0) {
+    payloadParts.push(rawDelta);
   }
 
-  if (delta.length > 0) {
+  if (stabilizedSentencesToEmit.length > 0) {
+    for (const sent of stabilizedSentencesToEmit) {
+      if (sent && !payloadParts.some(p => p.includes(sent))) {
+        payloadParts.push(sent);
+      }
+    }
+  }
+
+  const uniqueParts = Array.from(new Set(payloadParts.map(s => s.trim()).filter(Boolean)));
+  const finalDelta = uniqueParts.join('\n').trim();
+
+  if (finalDelta.length > 0) {
     const win = safeGetWindow();
     const origin = win && win.location ? win.location.origin : '';
     const title = doc && doc.title ? doc.title : '';
@@ -683,7 +709,7 @@ export function flushBatch(force = true) {
     const message = createMessage(READER_DELTA, {
       origin,
       gameKey: currentConfig.gameKey || undefined,
-      text: delta,
+      text: finalDelta,
       title: title || undefined
     });
 
