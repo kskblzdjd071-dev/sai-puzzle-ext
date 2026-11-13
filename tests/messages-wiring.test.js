@@ -554,6 +554,151 @@ test('READER_SCREENSHOT_REQUEST 第一次成功入库并带有模型标签，第
   assert.match(res2.payload.error, /^识图接口失败:/);
 });
 
+test('READER_SCREENSHOT_REQUEST 429 失败后窗口内被节流，窗口过后可再次调用', async () => {
+  let nowMs = 1_700_100_000_000;
+  let callCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        callCount++;
+        throw new Error('OpenAI 接口调用失败 (HTTP 429)');
+      }
+    }
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, false);
+  assert.match(res1.payload.error, /^识图接口失败:/);
+  assert.equal(callCount, 1);
+
+  nowMs += 10_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.equal(res2.payload.skipped, 'throttled');
+  assert.equal(callCount, 1);
+
+  nowMs += 31_000;
+
+  const res3 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_3' }
+  }));
+
+  assert.equal(res3.ok, true);
+  assert.equal(res3.payload.ok, false);
+  assert.match(res3.payload.error, /^识图接口失败:/);
+  assert.equal(callCount, 2);
+});
+
+test('READER_SCREENSHOT_REQUEST 502 失败后窗口内被节流，窗口过后可再次调用', async () => {
+  let nowMs = 1_700_200_000_000;
+  let callCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        callCount++;
+        throw new Error('OpenAI 接口调用失败 (HTTP 502)');
+      }
+    }
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, false);
+  assert.match(res1.payload.error, /^识图接口失败:/);
+  assert.equal(callCount, 1);
+
+  nowMs += 10_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.equal(res2.payload.skipped, 'throttled');
+  assert.equal(callCount, 1);
+
+  nowMs += 31_000;
+
+  const res3 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_3' }
+  }));
+
+  assert.equal(res3.ok, true);
+  assert.equal(res3.payload.ok, false);
+  assert.match(res3.payload.error, /^识图接口失败:/);
+  assert.equal(callCount, 2);
+});
+
+test('READER_SCREENSHOT_REQUEST 门禁错误不记入节流，窗口内再次点击仍会调用', async () => {
+  let nowMs = 1_700_300_000_000;
+  let callCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: {
+      extractClues: async () => {
+        callCount++;
+        throw new Error('当前模型不支持图像识别');
+      }
+    }
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, false);
+  assert.equal(callCount, 1);
+
+  nowMs += 10_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.equal(callCount, 2);
+});
+
 test('service-worker 源码将 queryIsCanvas 与 captureCanvas 传给了 createMessageRouter', async () => {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');

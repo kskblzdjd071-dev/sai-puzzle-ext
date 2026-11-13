@@ -557,6 +557,10 @@ export function createMessageRouter(deps) {
             }
           } catch (err) {
             const classifiedError = classifyVisionError(err, apiKey);
+            const errText = `${err && err.message ? err.message : ''} ${classifiedError}`;
+            if (/429|502/.test(errText)) {
+              screenshotThrottleMap.set(throttleKey, now());
+            }
             return screenshotResult(false, reason, { error: classifiedError });
           }
 
