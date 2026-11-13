@@ -771,6 +771,221 @@ test('READER_SCREENSHOT_REQUEST 真实网关 502 文案被替换后仍记节流'
   assert.equal(extractCluesCallCount, 2);
 });
 
+test('READER_SCREENSHOT_REQUEST 真实网关 503 上游暂时不可用文案记节流', async () => {
+  let nowMs = 1_700_500_000_000;
+  let extractCluesCallCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { createAiClient } = await import('../core/ai.js');
+  const { createMockHttpAdapter } = await import('../adapters/http.js');
+
+  const TEST_API_KEY_LOCAL = 'sk-TESTONLY_mock_054_503';
+  const http = createMockHttpAdapter(async () => ({
+    status: 503,
+    text: '上游暂时不可用',
+    json: { error: { message: '上游暂时不可用' } }
+  }));
+
+  const realAiClient = createAiClient({
+    http,
+    getSettings: () => ({
+      apiKey: TEST_API_KEY_LOCAL,
+      model: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1'
+    })
+  });
+
+  const originalExtractClues = realAiClient.extractClues.bind(realAiClient);
+  realAiClient.extractClues = async (...args) => {
+    extractCluesCallCount++;
+    return originalExtractClues(...args);
+  };
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: realAiClient
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_503_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, false);
+  assert.match(res1.payload.error, /^识图接口失败:/);
+  assert.equal(extractCluesCallCount, 1);
+
+  nowMs += 10_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_503_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.equal(res2.payload.skipped, 'throttled');
+  assert.equal(extractCluesCallCount, 1);
+
+  nowMs += 31_000;
+
+  const res3 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_503_3' }
+  }));
+
+  assert.equal(res3.ok, true);
+  assert.equal(res3.payload.ok, false);
+  assert.equal(extractCluesCallCount, 2);
+});
+
+test('READER_SCREENSHOT_REQUEST 真实网关 524 上游暂时不可用文案记节流', async () => {
+  let nowMs = 1_700_550_000_000;
+  let extractCluesCallCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { createAiClient } = await import('../core/ai.js');
+  const { createMockHttpAdapter } = await import('../adapters/http.js');
+
+  const TEST_API_KEY_LOCAL = 'sk-TESTONLY_mock_054_524';
+  const http = createMockHttpAdapter(async () => ({
+    status: 524,
+    text: '上游暂时不可用',
+    json: { error: { message: '上游暂时不可用' } }
+  }));
+
+  const realAiClient = createAiClient({
+    http,
+    getSettings: () => ({
+      apiKey: TEST_API_KEY_LOCAL,
+      model: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1'
+    })
+  });
+
+  const originalExtractClues = realAiClient.extractClues.bind(realAiClient);
+  realAiClient.extractClues = async (...args) => {
+    extractCluesCallCount++;
+    return originalExtractClues(...args);
+  };
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: realAiClient
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_524_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, false);
+  assert.match(res1.payload.error, /^识图接口失败:/);
+  assert.equal(extractCluesCallCount, 1);
+
+  nowMs += 10_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_524_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.equal(res2.payload.skipped, 'throttled');
+  assert.equal(extractCluesCallCount, 1);
+
+  nowMs += 31_000;
+
+  const res3 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_524_3' }
+  }));
+
+  assert.equal(res3.ok, true);
+  assert.equal(res3.payload.ok, false);
+  assert.equal(extractCluesCallCount, 2);
+});
+
+test('READER_SCREENSHOT_REQUEST 上游暂时不可用纯文案无状态码也记节流', async () => {
+  let nowMs = 1_700_600_000_000;
+  let extractCluesCallCount = 0;
+  const clueStore = createClueStore({ storage: createMemoryStorageAdapter() });
+
+  const { createAiClient } = await import('../core/ai.js');
+  const { createMockHttpAdapter } = await import('../adapters/http.js');
+
+  const TEST_API_KEY_LOCAL = 'sk-TESTONLY_mock_054_text';
+  const http = createMockHttpAdapter(async () => {
+    throw new Error('上游暂时不可用');
+  });
+
+  const realAiClient = createAiClient({
+    http,
+    getSettings: () => ({
+      apiKey: TEST_API_KEY_LOCAL,
+      model: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1'
+    })
+  });
+
+  const originalExtractClues = realAiClient.extractClues.bind(realAiClient);
+  realAiClient.extractClues = async (...args) => {
+    extractCluesCallCount++;
+    return originalExtractClues(...args);
+  };
+
+  const { router } = await setup({
+    now: () => nowMs,
+    clueStore,
+    getActiveTab: async () => ({ id: 1, url: 'https://game.example.com/play', title: '谜题', windowId: 1 }),
+    containsOrigin: async () => true,
+    aiClient: realAiClient
+  });
+
+  const res1 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_TEXT_1' }
+  }));
+
+  assert.equal(res1.ok, true);
+  assert.equal(res1.payload.ok, false);
+  assert.match(res1.payload.error, /^识图接口失败:/);
+  assert.ok(!/429|502|503|524/.test(res1.payload.error));
+  assert.equal(extractCluesCallCount, 1);
+
+  nowMs += 10_000;
+
+  const res2 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_TEXT_2' }
+  }));
+
+  assert.equal(res2.ok, true);
+  assert.equal(res2.payload.ok, false);
+  assert.equal(res2.payload.skipped, 'throttled');
+  assert.equal(extractCluesCallCount, 1);
+
+  nowMs += 31_000;
+
+  const res3 = await router.handleMessage(createMessage(READER_SCREENSHOT_REQUEST, {
+    origin: 'https://game.example.com',
+    image: { mimeType: 'image/jpeg', dataBase64: 'CUSTOM_PAYLOAD_IMAGE_TEXT_3' }
+  }));
+
+  assert.equal(res3.ok, true);
+  assert.equal(res3.payload.ok, false);
+  assert.equal(extractCluesCallCount, 2);
+});
+
 test('service-worker 源码将 queryIsCanvas 与 captureCanvas 传给了 createMessageRouter', async () => {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');

@@ -136,7 +136,7 @@ export const openaiAdapter = {
       res = await executeRequest();
     } catch (reqErr) {
       const em = String(reqErr && reqErr.message ? reqErr.message : reqErr);
-      if (em.includes('502') || em.includes('429')) {
+      if (em.includes('502') || em.includes('429') || em.includes('503') || em.includes('524')) {
         await new Promise((r) => setTimeout(r, 100));
         res = await executeRequest();
       } else {
@@ -144,7 +144,7 @@ export const openaiAdapter = {
       }
     }
 
-    if (res.status === 502 || res.status === 429) {
+    if (res.status === 502 || res.status === 429 || res.status === 503 || res.status === 524) {
       await new Promise((r) => setTimeout(r, 100));
       res = await executeRequest();
     }

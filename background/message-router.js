@@ -59,6 +59,9 @@ export function classifyVisionError(err, apiKey = '') {
   if (
     raw.includes('502') ||
     raw.includes('429') ||
+    raw.includes('503') ||
+    raw.includes('524') ||
+    raw.includes('上游暂时不可用') ||
     raw.includes('接口调用失败') ||
     raw.includes('接口错误')
   ) {
@@ -558,7 +561,7 @@ export function createMessageRouter(deps) {
           } catch (err) {
             const classifiedError = classifyVisionError(err, apiKey);
             const errText = `${err && err.message ? err.message : ''} ${classifiedError}`;
-            if (/429|502/.test(errText)) {
+            if (/429|502|503|524|上游暂时不可用/.test(errText)) {
               screenshotThrottleMap.set(throttleKey, now());
             }
             return screenshotResult(false, reason, { error: classifiedError });
