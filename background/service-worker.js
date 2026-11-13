@@ -115,7 +115,13 @@ const permissionsAdapter = {
 const storage = createChromeStorageAdapter();
 const http = createFetchHttpAdapter();
 const settingsService = createSettingsService({ storage, permissions: permissionsAdapter });
-const clueStore = createClueStore({ storage });
+const clueStore = createClueStore({
+  storage,
+  getApiKey: async () => {
+    const s = await settingsService.getSettings();
+    return s?.apiKey || '';
+  }
+});
 const aiClient = createAiClient({ http, getSettings: () => settingsService.getSettings() });
 
 // 向已打开且已授权的标签页自动注入 reader-loader

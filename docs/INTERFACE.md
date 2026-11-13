@@ -422,6 +422,8 @@ export interface ExtensionResponse<T = any> {
 - **去重算法**：
   - `dedupeKey(clue: { text: string }): string`：执行规范化——去除首尾空白字符、内部连续空白合并为单空格、英文字符全部转为小写。对规范化结果计算轻量哈希或直接作为键。
   - 在向存储写入 `addClues` 时，拉取当前游戏已有线索池，命中相同 `dedupeKey` 的线索直接剔除，仅入库并返回新增线索。
+- **敏感信息脱敏**：
+  - 在线索入库（`addClues`）及归档导出（`exportJSON` / `exportMarkdown`）前，必须将文本中的已配置 API Key 及明显形态密钥（如 `sk-...`、`AIza...`）彻底替换为字面量 `***`。去重操作应基于脱敏后的文本执行。
 - **问答存储与导出规格**：
   - 支持 `addQa(gameKey, entry)` 与 `listQa(gameKey)`：问答按游戏主键持久化入 GameRecord.qa 列表，包含问题、回答与时间戳。
   - `exportJSON(gameKey)`：导出标准 JSON 字符串，顶层包含元信息（导出时间戳、插件版本、游戏列表、线索详情与问答记录 qa）。输出前必须进行深度遍历，若发现任何键名为 `apiKey`、`baseUrl` 的字段，强制抛出异常阻断导出。

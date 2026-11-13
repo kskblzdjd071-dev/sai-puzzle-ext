@@ -289,3 +289,72 @@ test('无线索但有问答时，JSON 仍导出该 game 且 qa 非空、clues �
   assert.equal(parsed.games[0].qa.length, 1);
   assert.equal(parsed.games[0].qa[0].question, '现在该怎么走？');
 });
+
+test('addClues 与导出自动脱敏配置密钥和 sk- 形态密钥为 ***', async () => {
+  const configuredKey = 'sk-TESTONLY_configured_key_abcdefg';
+  const embeddedKey = 'sk-TESTONLY_embedded_other_key_xyz999';
+
+  const storage = createMemoryStorageAdapter();
+  const store = createClueStore({
+    storage,
+    getApiKey: () => configuredKey
+  });
+  const gameKey = 'https://game.test::room-sanitize';
+
+  const added = await store.addClues(gameKey, [
+    {
+      text: `发现日志：用户使用了密钥 ${configuredKey}，还有临时凭据 ${embeddedKey}。`,
+      tags: [`tag-${embeddedKey}`]
+    }
+  ]);
+
+  assert.equal(added.length, 1);
+  assert.equal(added[0].text.includes(configuredKey), false);
+  assert.equal(added[0].text.includes(embeddedKey), false);
+  assert.ok(added[0].text.includes('***'));
+  assert.equal(added[0].tags[0].includes(embeddedKey), false);
+  assert.ok(added[0].tags[0].includes('***'));
+
+  const clues = await store.listClues(gameKey);
+  assert.equal(clues[0].text.includes(configuredKey), false);
+  assert.equal(clues[0].text.includes(embeddedKey), false);
+  assert.ok(clues[0].text.includes('***'));
+
+  const jsonStr = await store.exportJSON(gameKey);
+  assert.equal(jsonStr.includes(configuredKey), false);
+  assert.equal(jsonStr.includes(embeddedKey), false);
+  assert.ok(jsonStr.includes('***'));
+
+  const mdStr = await store.exportMarkdown(gameKey);
+  assert.equal(mdStr.includes(configuredKey), false);
+  assert.equal(mdStr.includes(embeddedKey), false);
+  assert.ok(mdStr.includes('***'));
+
+  // 验证即使历史数据中已有明文（例如直接写入 storage），导出时也能二次脱敏
+  await storage.set('clues:v1:legacy-leak', {
+    gameKey: 'legacy-leak',
+    origin: 'legacy-leak',
+    title: '历史泄漏测试',
+    clues: [
+      {
+        id: 'legacy-1',
+        gameKey: 'legacy-leak',
+        text: `历史明文密钥：${configuredKey} 和 ${embeddedKey}`,
+        createdAt: 1000
+      }
+    ],
+    qa: [],
+    createdAt: 1000,
+    updatedAt: 1000
+  });
+
+  const legacyJson = await store.exportJSON('legacy-leak');
+  assert.equal(legacyJson.includes(configuredKey), false);
+  assert.equal(legacyJson.includes(embeddedKey), false);
+  assert.ok(legacyJson.includes('***'));
+
+  const legacyMd = await store.exportMarkdown('legacy-leak');
+  assert.equal(legacyMd.includes(configuredKey), false);
+  assert.equal(legacyMd.includes(embeddedKey), false);
+  assert.ok(legacyMd.includes('***'));
+});

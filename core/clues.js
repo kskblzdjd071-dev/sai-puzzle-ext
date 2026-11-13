@@ -12,11 +12,60 @@ const CLUE_PREFIX = 'clues:v1:';
  * @param {{ text: string }} clue
  * @returns {string}
  */
+/**
+ * 将文本中的 API Key 及明显形态密钥（sk- / AIza）替换为 ***
+ * @param {string} text
+ * @param {string} [apiKey]
+ * @returns {string}
+ */
+export function sanitizeSecretText(text, apiKey) {
+  if (!text || typeof text !== 'string') {
+    return text || '';
+  }
+  let sanitized = text;
+  if (apiKey && typeof apiKey === 'string' && apiKey.trim().length > 0) {
+    sanitized = sanitized.replaceAll(apiKey, '***');
+  }
+  return sanitized
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, '***')
+    .replace(/AIza[A-Za-z0-9_-]{8,}/g, '***');
+}
+
 export function dedupeKey(clue) {
   if (!clue || typeof clue.text !== 'string') {
     return '';
   }
   return clue.text.trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function sanitizeClue(clue, apiKey) {
+  if (!clue) return clue;
+  return {
+    ...clue,
+    text: sanitizeSecretText(clue.text, apiKey),
+    tags: Array.isArray(clue.tags)
+      ? clue.tags.map((t) => sanitizeSecretText(t, apiKey))
+      : clue.tags
+  };
+}
+
+function sanitizeQa(qaItem, apiKey) {
+  if (!qaItem) return qaItem;
+  return {
+    ...qaItem,
+    question: sanitizeSecretText(qaItem.question, apiKey),
+    answer: sanitizeSecretText(qaItem.answer, apiKey),
+    summary: typeof qaItem.summary === 'string' ? sanitizeSecretText(qaItem.summary, apiKey) : qaItem.summary
+  };
+}
+
+function sanitizeGameRecord(game, apiKey) {
+  if (!game) return game;
+  return {
+    ...game,
+    clues: Array.isArray(game.clues) ? game.clues.map((c) => sanitizeClue(c, apiKey)) : [],
+    qa: Array.isArray(game.qa) ? game.qa.map((q) => sanitizeQa(q, apiKey)) : []
+  };
 }
 
 /**
@@ -44,9 +93,9 @@ function assertNoSensitiveKeys(obj) {
 
 /**
  * 创建线索持久化仓库
- * @param {{ storage: import('./models.js').StorageAdapter, now?: () => number, id?: () => string }} param0
+ * @param {{ storage: import('./models.js').StorageAdapter, now?: () => number, id?: () => string, getApiKey?: () => (string | Promise<string>) }} param0
  */
-export function createClueStore({ storage, now = Date.now, id }) {
+export function createClueStore({ storage, now = Date.now, id, getApiKey }) {
   if (!storage) {
     throw new Error('缺少必需的 storage 适配器');
   }
@@ -91,6 +140,8 @@ export function createClueStore({ storage, now = Date.now, id }) {
         return [];
       }
 
+      const currentApiKey = typeof getApiKey === 'function' ? await getApiKey() : '';
+
       let record = await readRecord(gameKey);
       if (!record) {
         const parsed = parseGameKey(gameKey);
@@ -113,7 +164,11 @@ export function createClueStore({ storage, now = Date.now, id }) {
         if (!item || !item.text || !item.text.trim()) {
           continue;
         }
-        const key = dedupeKey(item);
+        const sanitizedText = sanitizeSecretText(item.text.trim(), currentApiKey);
+        if (!sanitizedText) {
+          continue;
+        }
+        const key = dedupeKey({ text: sanitizedText });
         if (existingMap.has(key)) {
           continue;
         }
@@ -122,11 +177,11 @@ export function createClueStore({ storage, now = Date.now, id }) {
         const newClue = {
           id: nextId(),
           gameKey,
-          text: item.text.trim(),
+          text: sanitizedText,
           source: item.source || 'text',
           createdAt: now(),
           tags: Array.isArray(item.tags)
-            ? item.tags.map((t) => String(t).trim()).filter(Boolean)
+            ? item.tags.map((t) => sanitizeSecretText(String(t).trim(), currentApiKey)).filter(Boolean)
             : [],
           imageRef: item.imageRef || undefined
         };
@@ -271,13 +326,14 @@ export function createClueStore({ storage, now = Date.now, id }) {
     },
 
     async exportJSON(gameKey) {
+      const currentApiKey = typeof getApiKey === 'function' ? await getApiKey() : '';
       let exportData;
       if (gameKey) {
         const game = await getGameRecord(gameKey);
         exportData = {
           version: '1.0',
           exportedAt: now(),
-          games: game ? [game] : []
+          games: game ? [sanitizeGameRecord(game, currentApiKey)] : []
         };
       } else {
         const keys = await storage.listKeys(CLUE_PREFIX);
@@ -285,11 +341,11 @@ export function createClueStore({ storage, now = Date.now, id }) {
         for (const k of keys) {
           const g = await storage.get(k);
           if (g) {
-            list.push({
+            list.push(sanitizeGameRecord({
               ...g,
               clues: Array.isArray(g.clues) ? g.clues : [],
               qa: Array.isArray(g.qa) ? g.qa : []
-            });
+            }, currentApiKey));
           }
         }
         exportData = {
@@ -309,20 +365,21 @@ export function createClueStore({ storage, now = Date.now, id }) {
     },
 
     async exportMarkdown(gameKey) {
+      const currentApiKey = typeof getApiKey === 'function' ? await getApiKey() : '';
       let games = [];
       if (gameKey) {
         const g = await getGameRecord(gameKey);
-        if (g) games.push(g);
+        if (g) games.push(sanitizeGameRecord(g, currentApiKey));
       } else {
         const keys = await storage.listKeys(CLUE_PREFIX);
         for (const k of keys) {
           const g = await storage.get(k);
           if (g) {
-            games.push({
+            games.push(sanitizeGameRecord({
               ...g,
               clues: Array.isArray(g.clues) ? g.clues : [],
               qa: Array.isArray(g.qa) ? g.qa : []
-            });
+            }, currentApiKey));
           }
         }
       }
