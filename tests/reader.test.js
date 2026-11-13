@@ -344,8 +344,8 @@ test('collectVisibleText: 标签过滤、样式隐藏、role过滤与保留普�
   assert.ok(!collected.includes('隐藏正文1'));
   assert.ok(!collected.includes('隐藏正文2'));
   assert.ok(collected.includes('正文 段落一 内容'));
-  // 确认多余空白被折叠
-  assert.equal(collected, '游戏顶部状态栏 正文 段落一 内容');
+  // 确认块级元素以换行分隔且多余空白被折叠
+  assert.equal(collected, '游戏顶部状态栏\n正文 段落一 内容');
 });
 
 test('shouldCaptureCanvas: 尺寸判定与视口面积占比判定', () => {
@@ -1010,8 +1010,98 @@ test('补发与新内容合并：密码连续变化后延迟补发与新内容�
     batchTimer.fn();
 
     assert.equal(sentMessages.length, 3);
-    assert.ok(sentMessages[2].payload.text.includes('9'));
-    assert.ok(sentMessages[2].payload.text.includes('门开了'));
+    const lastPayload = sentMessages[2].payload.text;
+    assert.ok(lastPayload.includes('转盘密码 9'), '必须包含完整原句「转盘密码 9」');
+    assert.ok(lastPayload.includes('门开了。'), '必须包含新追加的「门开了。」');
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('滚动 3 行日志：同模板滚动删除顶部行并追加底部行时，每一个新回合均正常发出', () => {
+  stopReader();
+
+  let fakeNow = 10000;
+  const sentMessages = [];
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+
+  const intervals = new Map();
+  let nextId = 1;
+
+  globalThis.setInterval = (fn, ms) => {
+    const id = nextId++;
+    intervals.set(id, { fn, ms });
+    return id;
+  };
+  globalThis.clearInterval = (id) => {
+    intervals.delete(id);
+  };
+
+  globalThis.chrome = {
+    runtime: {
+      sendMessage(msg, cb) {
+        sentMessages.push(msg);
+        if (typeof cb === 'function') cb();
+      }
+    }
+  };
+
+  const body = createNode('body');
+
+  function makeRoundNode(round, coins) {
+    const p = createNode('p');
+    p.appendChild(createTextNode(`第 ${round} 回合：获得 ${coins} 枚金币。`));
+    return p;
+  }
+
+  // 初始 3 行
+  body.appendChild(makeRoundNode(1, 10));
+  body.appendChild(makeRoundNode(2, 20));
+  body.appendChild(makeRoundNode(3, 30));
+
+  const mockDoc = createDocStub(body);
+  globalThis.document = mockDoc;
+
+  try {
+    startReader({ now: () => fakeNow, batchIntervalMs: 5000 });
+    const batchTimer = Array.from(intervals.values()).find(t => t.ms === 5000);
+
+    // 首次 tick：静息无发送
+    fakeNow += 5000;
+    batchTimer.fn();
+    assert.equal(sentMessages.length, 0);
+
+    // 滚动 12 次：删掉最上面一行，底部追加新回合
+    for (let r = 4; r <= 15; r++) {
+      fakeNow += 1000;
+      // 移除 body.firstChild
+      body.firstChild = body.firstChild.nextSibling;
+      // 追加新行
+      const newCoins = r * 10;
+      body.appendChild(makeRoundNode(r, newCoins));
+
+      batchTimer.fn();
+
+      const expectedSentCount = r - 3;
+      assert.equal(sentMessages.length, expectedSentCount, `第 ${r} 回合发送次数应为 ${expectedSentCount}`);
+      const latestMsg = sentMessages[sentMessages.length - 1];
+      const expectedText = `第 ${r} 回合：获得 ${newCoins} 枚金币。`;
+      assert.ok(latestMsg.payload.text.includes(expectedText), `第 ${r} 回合未在 payload 中找到：${latestMsg.payload.text}`);
+    }
+
+    // 滚动结束后再静置 tick 一次，确认没有多余的裸数字补发
+    fakeNow += 6000;
+    batchTimer.fn();
+    assert.equal(sentMessages.length, 12, '滚动结束后无额外裸数字发送');
   } finally {
     stopReader();
     globalThis.setInterval = originalSetInterval;

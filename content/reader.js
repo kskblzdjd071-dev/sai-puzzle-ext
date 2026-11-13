@@ -146,6 +146,13 @@ function isElementVisible(elem, win) {
   return true;
 }
 
+const BLOCK_TAGS = new Set([
+  'address', 'article', 'aside', 'blockquote', 'dd', 'div', 'dl', 'dt',
+  'fieldset', 'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3',
+  'h4', 'h5', 'h6', 'header', 'hgroup', 'hr', 'li', 'main', 'nav', 'noscript',
+  'ol', 'p', 'pre', 'section', 'table', 'tfoot', 'ul', 'tr'
+]);
+
 export function collectVisibleText(doc = safeGetDoc()) {
   if (!doc) return '';
   const root = doc.body || doc.documentElement || doc;
@@ -154,14 +161,25 @@ export function collectVisibleText(doc = safeGetDoc()) {
   const win = doc.defaultView || safeGetWindow();
   const ignoredTags = new Set(['script', 'style', 'noscript', 'iframe', 'svg']);
 
-  const texts = [];
+  const blockLines = [];
+  let currentInlineTexts = [];
+
+  function flushInline() {
+    if (currentInlineTexts.length > 0) {
+      const line = currentInlineTexts.join(' ').replace(/\s+/g, ' ').trim();
+      if (line.length > 0) {
+        blockLines.push(line);
+      }
+      currentInlineTexts = [];
+    }
+  }
 
   function traverse(node) {
     if (!node) return;
     if (node.nodeType === 3) {
       const val = node.nodeValue;
       if (val && val.trim().length > 0) {
-        texts.push(val);
+        currentInlineTexts.push(val);
       }
       return;
     }
@@ -175,16 +193,26 @@ export function collectVisibleText(doc = safeGetDoc()) {
       if (ignoredTags.has(tag)) return;
       if (!isElementVisible(node, win)) return;
 
+      const isBlock = BLOCK_TAGS.has(tag);
+      if (isBlock) {
+        flushInline();
+      }
+
       let child = node.firstChild;
       while (child) {
         traverse(child);
         child = child.nextSibling;
       }
+
+      if (isBlock) {
+        flushInline();
+      }
     }
   }
 
   traverse(root);
-  return texts.join(' ').replace(/\s+/g, ' ').trim();
+  flushInline();
+  return blockLines.join('\n').trim();
 }
 
 const TEMPORAL_REGEXES = [
@@ -221,13 +249,16 @@ function splitIntoSentences(text) {
 
 // 提取文本中的局部非计时数字 slot 信息
 // 结构：{ key, sentenceSkeleton, occurrenceIndex, slotIndexInSentence, val, sentence }
-function extractLocalNumericSlots(text) {
+function extractLocalNumericSlots(text, prevSlots = null) {
   const sentences = splitIntoSentences(text);
   const slots = [];
   const occurrenceMap = new Map();
 
-  for (const sentence of sentences) {
-    // 先遮蔽计时/时钟数字
+  for (let sIdx = 0; sIdx < sentences.length; sIdx++) {
+    const sentence = sentences[sIdx];
+    const prevSent = sIdx > 0 ? sentences[sIdx - 1] : '';
+    const nextSent = sIdx < sentences.length - 1 ? sentences[sIdx + 1] : '';
+
     const maskedSentence = maskTemporalTokens(sentence);
     const sentenceSkeleton = maskedSentence.replace(/\b\d+\b/g, () => `__NUM_SLOT__`);
     const occurrenceIndex = occurrenceMap.get(sentenceSkeleton) || 0;
@@ -236,19 +267,66 @@ function extractLocalNumericSlots(text) {
     let indexInSentence = 0;
     let match;
     const numRegex = /\b\d+\b/g;
-    // 在 maskedSentence 寻找非 __TIME__ 内部的数字
     while ((match = numRegex.exec(maskedSentence)) !== null) {
       const val = match[0];
       const slotIndex = indexInSentence++;
-      const key = `${sentenceSkeleton}:::occ_${occurrenceIndex}:::slot_${slotIndex}`;
+      const fallbackKey = `${sentenceSkeleton}:::occ_${occurrenceIndex}:::slot_${slotIndex}`;
       slots.push({
-        key,
+        key: fallbackKey,
         sentenceSkeleton,
         occurrenceIndex,
         slotIndexInSentence: slotIndex,
         val,
-        sentence
+        sentence,
+        prevSent,
+        nextSent,
+        alignedFromPrev: false
       });
+    }
+  }
+
+  // 若提供了 prevSlots，进行上下文对齐，防止顶部行滚动删除时 occ 序号整体平移
+  if (prevSlots && prevSlots.length > 0) {
+    const usedPrevKeys = new Set();
+    for (const nSlot of slots) {
+      // 1. 优先对齐完全一致的句子
+      let matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
+        p.sentence === nSlot.sentence &&
+        p.slotIndexInSentence === nSlot.slotIndexInSentence);
+
+      // 2. 骨架相同且前后邻句之一相同的局部对齐
+      if (!matchP) {
+        matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
+          p.sentenceSkeleton === nSlot.sentenceSkeleton &&
+          p.slotIndexInSentence === nSlot.slotIndexInSentence &&
+          ((p.prevSent && p.prevSent === nSlot.prevSent) || (p.nextSent && p.nextSent === nSlot.nextSent)));
+      }
+
+      // 3. 单句或同骨架出现次数相同的稳定对齐
+      if (!matchP) {
+        const prevCount = prevSlots.filter(p => p.sentenceSkeleton === nSlot.sentenceSkeleton).length;
+        const nextCount = slots.filter(s => s.sentenceSkeleton === nSlot.sentenceSkeleton).length;
+        if (prevCount === nextCount) {
+          matchP = prevSlots.find(p => !usedPrevKeys.has(p.key) &&
+            p.sentenceSkeleton === nSlot.sentenceSkeleton &&
+            p.slotIndexInSentence === nSlot.slotIndexInSentence &&
+            p.occurrenceIndex === nSlot.occurrenceIndex);
+        }
+      }
+
+      if (matchP) {
+        nSlot.key = matchP.key;
+        nSlot.alignedFromPrev = true;
+        usedPrevKeys.add(matchP.key);
+      } else {
+        const prevKeySet = new Set(prevSlots.map(p => p.key));
+        let seq = 0;
+        let candidateKey;
+        do {
+          candidateKey = `${nSlot.sentenceSkeleton}:::new_${++seq}:::slot_${nSlot.slotIndexInSentence}`;
+        } while (prevKeySet.has(candidateKey));
+        nSlot.key = candidateKey;
+      }
     }
   }
 
@@ -541,9 +619,13 @@ export function flushBatch(force = true) {
 
   isDomDirty = false;
 
-  // 1. 抽取基于稳定局部上下文的非计时数字槽位
+  const nextSentences = splitIntoSentences(next);
+  const prevSentences = splitIntoSentences(prev);
+  const prevSentenceSet = new Set(prevSentences);
+
+  // 1. 抽取基于稳定局部上下文的非计时数字槽位（带上下文对齐）
   const pLocalSlots = extractLocalNumericSlots(prev);
-  const nLocalSlots = extractLocalNumericSlots(next);
+  const nLocalSlots = extractLocalNumericSlots(next, pLocalSlots);
 
   const prevSlotMap = new Map();
   for (const s of pLocalSlots) {
@@ -567,6 +649,7 @@ export function flushBatch(force = true) {
       record = {
         slotKey: key,
         lastVal: baseVal,
+        lastSentence: nSlot.sentence,
         changeTimes: [],
         isJumping: false,
         lastChangeAt: now,
@@ -581,6 +664,7 @@ export function flushBatch(force = true) {
 
     if (record) {
       record.lastAccess = now;
+      record.lastSentence = nSlot.sentence;
       const hadChanged = record.lastVal !== currentVal;
 
       if (hadChanged) {
@@ -617,9 +701,9 @@ export function flushBatch(force = true) {
   // 对上一轮或之前存在且仍处于跳动状态但当前不在 nLocalSlots 的槽位检查稳定补发
   for (const [key, record] of slotTracker.entries()) {
     if (record.isJumping && !record.finalEmitted && now - record.lastChangeAt > 5000) {
-      if (next.includes(record.lastVal)) {
-        stabilizedSentencesToEmit.push(record.lastVal);
-      }
+      const sentenceContainingVal = nextSentences.find(s => s.includes(record.lastVal));
+      const sentenceToEmit = sentenceContainingVal || record.lastSentence || record.lastVal;
+      stabilizedSentencesToEmit.push(sentenceToEmit);
       record.finalEmitted = true;
       record.isJumping = false;
       slotTracker.delete(key);
@@ -628,23 +712,24 @@ export function flushBatch(force = true) {
 
   pruneSlotTracker(now);
 
-  // 2. 遮罩仅用于判断有无新内容。maskJumpingSlotsInText 需与 extractLocalNumericSlots 统一 occ_ 下标
-  function maskJumpingSlotsInText(targetText, activeJumpingKeys) {
+  // 2. 遮罩仅用于判断有无新内容
+  function maskJumpingSlotsInText(targetText, activeJumpingKeys, isNextText = false) {
     if (!targetText || activeJumpingKeys.size === 0) return targetText;
+    const slots = isNextText ? nLocalSlots : pLocalSlots;
+    const slotKeyMap = new Map();
+    for (const s of slots) {
+      slotKeyMap.set(`${s.sentence}:::${s.slotIndexInSentence}`, s.key);
+    }
+
     const sentences = splitIntoSentences(targetText);
-    const occurrenceMap = new Map();
     const transformed = sentences.map(sentence => {
       const masked = maskTemporalTokens(sentence);
-      const sentenceSkeleton = masked.replace(/\b\d+\b/g, () => `__NUM_SLOT__`);
-      const occurrenceIndex = occurrenceMap.get(sentenceSkeleton) || 0;
-      occurrenceMap.set(sentenceSkeleton, occurrenceIndex + 1);
-
       let indexInSentence = 0;
       const replacedMasked = masked.replace(/\b\d+\b/g, (m) => {
         const slotIdx = indexInSentence++;
-        const key = `${sentenceSkeleton}:::occ_${occurrenceIndex}:::slot_${slotIdx}`;
-        if (activeJumpingKeys.has(key)) {
-          return jumpingMaskMap.get(key) || m;
+        const mappedKey = slotKeyMap.get(`${sentence}:::${slotIdx}`);
+        if (mappedKey && activeJumpingKeys.has(mappedKey)) {
+          return jumpingMaskMap.get(mappedKey) || m;
         }
         return m;
       });
@@ -669,7 +754,7 @@ export function flushBatch(force = true) {
         return '__TIME__';
       });
     });
-    return transformed.join(' ');
+    return transformed.join('\n');
   }
 
   const allJumpingKeys = new Set(jumpingMaskMap.keys());
@@ -677,8 +762,8 @@ export function flushBatch(force = true) {
   let effectiveNext = next;
 
   if (allJumpingKeys.size > 0) {
-    effectivePrev = maskJumpingSlotsInText(prev, allJumpingKeys);
-    effectiveNext = maskJumpingSlotsInText(next, allJumpingKeys);
+    effectivePrev = maskJumpingSlotsInText(prev, allJumpingKeys, false);
+    effectiveNext = maskJumpingSlotsInText(next, allJumpingKeys, true);
   }
 
   // 3. 计算增量并决定是否发送。发送的文本必须来自原文，不得发送改写后的文字
@@ -688,6 +773,27 @@ export function flushBatch(force = true) {
   const payloadParts = [];
   if (maskedDelta.length > 0) {
     payloadParts.push(rawDelta);
+  }
+
+  // 新出现的原句一律纳入发送，不受跳动遮罩抑制
+  // 但纯计时变化或继承了旧槽位（仅数字跳动）的句子不得走「新句必发」
+  const prevNormalizedTemporalSet = new Set(prevSentences.map(s => normalizeTemporalTokens(s)));
+
+  for (const nSent of nextSentences) {
+    if (prevSentenceSet.has(nSent)) {
+      continue;
+    }
+    if (prevNormalizedTemporalSet.has(normalizeTemporalTokens(nSent))) {
+      continue;
+    }
+    const sentSlots = nLocalSlots.filter(s => s.sentence === nSent);
+    if (sentSlots.length > 0 && sentSlots.every(s => s.alignedFromPrev)) {
+      continue;
+    }
+
+    if (!payloadParts.some(p => p.includes(nSent))) {
+      payloadParts.push(nSent);
+    }
   }
 
   if (stabilizedSentencesToEmit.length > 0) {
