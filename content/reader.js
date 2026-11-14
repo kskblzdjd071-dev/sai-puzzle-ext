@@ -350,8 +350,10 @@ function extractLocalNumericSlots(text, prevSlots = null) {
 }
 
 export function computeDelta(prev, next) {
-  const p = (prev == null ? '' : String(prev)).replace(/\s+/g, ' ').trim();
-  const n = (next == null ? '' : String(next)).replace(/\s+/g, ' ').trim();
+  const rawP = prev == null ? '' : String(prev);
+  const rawN = next == null ? '' : String(next);
+  const p = rawP.replace(/\s+/g, ' ').trim();
+  const n = rawN.replace(/\s+/g, ' ').trim();
 
   if (!n) return '';
   if (!p) return n;
@@ -360,6 +362,38 @@ export function computeDelta(prev, next) {
   // (a) 若仅有计时/倒计时/时钟发生变化，则返回空串
   if (normalizeTemporalTokens(p) === normalizeTemporalTokens(n)) {
     return '';
+  }
+
+  // (a.1) 用未折叠换行的原文按句做集合比较：
+  //   - 纯调序（同一组句子仅顺序互换）→ 不发送
+  //   - 旧句都还在、只是多了新句（调序并插入）→ 只发送新增句子
+  //   句子被改写、子串、前缀等场景继续走原有逻辑，不把整页当新句返回。
+  {
+    const normalizeSent = (s) => (s == null ? '' : String(s)).replace(/\s+/g, ' ').trim();
+    const prevSentences = splitIntoSentences(rawP).map(normalizeSent).filter(Boolean);
+    const nextSentences = splitIntoSentences(rawN).map(normalizeSent).filter(Boolean);
+    if (prevSentences.length > 0 && nextSentences.length > 0) {
+      const prevSet = new Set(prevSentences);
+      const nextSet = new Set(nextSentences);
+      const allPrevKept = prevSentences.every((s) => nextSet.has(s));
+      const allNextKnown = nextSentences.every((s) => prevSet.has(s));
+      if (allPrevKept && allNextKnown) {
+        return '';
+      }
+      if (allPrevKept) {
+        const seen = new Set();
+        const added = [];
+        for (const s of nextSentences) {
+          if (!prevSet.has(s) && !seen.has(s)) {
+            seen.add(s);
+            added.push(s);
+          }
+        }
+        if (added.length > 0) {
+          return added.join('\n');
+        }
+      }
+    }
   }
 
   if (n.startsWith(p)) {
@@ -735,11 +769,12 @@ export function flushBatch(force = true) {
     }
   }
 
-  // 对上一轮或之前存在且仍处于跳动状态但当前不在 nLocalSlots 的槽位检查稳定补发
+  // 对上一轮或之前存在且仍处于跳动状态但当前不在 nLocalSlots 的槽位检查稳定补发。
+  // 只使用被跟踪项自己的上下文（lastSentence），为空时退回裸跟踪值（lastVal）；
+  // 禁止按数字去匹配页上碰巧含同一数字的其他句子。
   for (const [key, record] of slotTracker.entries()) {
     if (record.isJumping && !record.finalEmitted && now - record.lastChangeAt > 5000) {
-      const sentenceContainingVal = nextSentences.find(s => s.includes(record.lastVal));
-      const sentenceToEmit = sentenceContainingVal || record.lastSentence || record.lastVal;
+      const sentenceToEmit = record.lastSentence || record.lastVal;
       stabilizedSentencesToEmit.push(sentenceToEmit);
       record.finalEmitted = true;
       record.isJumping = false;

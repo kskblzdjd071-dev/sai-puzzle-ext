@@ -1352,3 +1352,243 @@ test('打满容量不持续发送：大量静态句子后高频计数变化被�
     else globalThis.document = originalDocument;
   }
 });
+
+test('稳定补发只使用被跟踪项自己的句子，不借用页上同数字的其他句子', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  try {
+    let now = 100000;
+    const intervals = [];
+    globalThis.setInterval = (fn, ms) => {
+      const timer = { fn, ms, id: intervals.length + 1 };
+      intervals.push(timer);
+      return timer.id;
+    };
+    globalThis.clearInterval = () => {};
+
+    const sent = [];
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: (...args) => { sent.push(args[0]); },
+        onMessage: { addListener: () => {} },
+      },
+    };
+
+    const body = createNode('body');
+    const doc = createDocStub(body);
+    globalThis.document = doc;
+
+    const makeP = (text) => {
+      const p = createNode('p');
+      p.appendChild(createTextNode(text));
+      body.appendChild(p);
+      return p;
+    };
+    const setText = (node, text) => {
+      node.nodeValue = text;
+      node.data = text;
+      if ('textContent' in node) node.textContent = text;
+    };
+
+    makeP('房间 9 号有钥匙。');
+    const dialP = makeP('转盘密码 1');
+    const dialText = dialP.firstChild;
+
+    startReader({ now: () => now, batchIntervalMs: 5000 });
+    const batchTimer = intervals.find((t) => t.ms === 5000);
+    assert.ok(batchTimer, '应注册 5000ms 批处理定时器');
+
+    batchTimer.fn();
+
+    now += 100;
+    setText(dialText, '转盘密码 2');
+    batchTimer.fn();
+
+    now += 100;
+    setText(dialText, '转盘密码 3');
+    batchTimer.fn();
+
+    now += 100;
+    setText(dialText, '转盘密码 9');
+    batchTimer.fn();
+
+    dialP.firstChild.nodeValue = '';
+
+    now += 6000;
+    batchTimer.fn();
+
+    const sentTexts = sent.map((m) => String(m && m.payload && m.payload.text));
+    assert.ok(sentTexts.length > 0, '应发生稳定补发');
+    assert.ok(
+      sentTexts.some((t) => t.includes('转盘密码 9')),
+      `补发应为被跟踪项自己的句子，实际：${JSON.stringify(sentTexts)}`
+    );
+    assert.ok(
+      !sentTexts.some((t) => t === '房间 9 号有钥匙。'),
+      `不得借用页上同数字的其他句子，实际：${JSON.stringify(sentTexts)}`
+    );
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('仅调换行顺序（内容不变）不发送整页', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  try {
+    let now = 200000;
+    const intervals = [];
+    globalThis.setInterval = (fn, ms) => {
+      const timer = { fn, ms, id: intervals.length + 1 };
+      intervals.push(timer);
+      return timer.id;
+    };
+    globalThis.clearInterval = () => {};
+
+    const sent = [];
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: (...args) => { sent.push(args[0]); },
+        onMessage: { addListener: () => {} },
+      },
+    };
+
+    const body = createNode('body');
+    const doc = createDocStub(body);
+    globalThis.document = doc;
+
+    const makeP = (text) => {
+      const p = createNode('p');
+      p.appendChild(createTextNode(text));
+      body.appendChild(p);
+      return p;
+    };
+
+    const p1 = makeP('第一行线索。');
+    const p2 = makeP('第二行线索。');
+    const p3 = makeP('第三行线索。');
+
+    startReader({ now: () => now, batchIntervalMs: 5000 });
+    const batchTimer = intervals.find((t) => t.ms === 5000);
+    assert.ok(batchTimer, '应注册 5000ms 批处理定时器');
+
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '初始 tick 不应发送');
+
+    // 整页倒序
+    body.firstChild = p3;
+    p3.nextSibling = p2;
+    p2.nextSibling = p1;
+    p1.nextSibling = null;
+
+    now += 100;
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '整页倒序不应发送');
+
+    // 只交换其中两行（p1 和 p3）
+    body.firstChild = p1;
+    p1.nextSibling = p2;
+    p2.nextSibling = p3;
+    p3.nextSibling = null;
+
+    now += 100;
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '仅交换两行不应发送');
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
+
+test('调序并且多了一行新内容时只发送那行新内容', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  try {
+    let now = 300000;
+    const intervals = [];
+    globalThis.setInterval = (fn, ms) => {
+      const timer = { fn, ms, id: intervals.length + 1 };
+      intervals.push(timer);
+      return timer.id;
+    };
+    globalThis.clearInterval = () => {};
+
+    const sent = [];
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: (...args) => { sent.push(args[0]); },
+        onMessage: { addListener: () => {} },
+      },
+    };
+
+    const body = createNode('body');
+    const doc = createDocStub(body);
+    globalThis.document = doc;
+
+    const makeP = (text) => {
+      const p = createNode('p');
+      p.appendChild(createTextNode(text));
+      body.appendChild(p);
+      return p;
+    };
+
+    const p1 = makeP('第一行线索。');
+    const p2 = makeP('第二行线索。');
+    const p3 = makeP('第三行线索。');
+
+    startReader({ now: () => now, batchIntervalMs: 5000 });
+    const batchTimer = intervals.find((t) => t.ms === 5000);
+    assert.ok(batchTimer, '应注册 5000ms 批处理定时器');
+
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '初始 tick 不应发送');
+
+    // 旧行齐全，仅调序并追加新行
+    body.firstChild = p3;
+    p3.nextSibling = p2;
+    p2.nextSibling = p1;
+    p1.nextSibling = null;
+    const p4 = makeP('第四行新线索。');
+    p1.nextSibling = p4;
+    p4.nextSibling = null;
+
+    now += 100;
+    batchTimer.fn();
+
+    assert.ok(sent.length > 0, '新增行应触发发送');
+    const lastText = String(
+      sent[sent.length - 1] &&
+      sent[sent.length - 1].payload &&
+      sent[sent.length - 1].payload.text
+    );
+    assert.ok(lastText.includes('第四行新线索'), `应包含新增行，实际：${lastText}`);
+    assert.ok(!lastText.includes('第一行线索'), `不应重发旧行，实际：${lastText}`);
+    assert.ok(!lastText.includes('第二行线索'), `不应重发旧行，实际：${lastText}`);
+    assert.ok(!lastText.includes('第三行线索'), `不应重发旧行，实际：${lastText}`);
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
