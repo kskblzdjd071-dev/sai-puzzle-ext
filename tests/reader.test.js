@@ -1592,3 +1592,78 @@ test('调序并且多了一行新内容时只发送那行新内容', async () =>
     else globalThis.document = originalDocument;
   }
 });
+
+test('同模板含数字调换顺序且无新增行时不重发', async () => {
+  const originalChrome = globalThis.chrome;
+  const originalDocument = globalThis.document;
+  const originalSetInterval = globalThis.setInterval;
+  const originalClearInterval = globalThis.clearInterval;
+  try {
+    let now = 400000;
+    const intervals = [];
+    globalThis.setInterval = (fn, ms) => {
+      const timer = { fn, ms, id: intervals.length + 1 };
+      intervals.push(timer);
+      return timer.id;
+    };
+    globalThis.clearInterval = () => {};
+
+    const sent = [];
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: (...args) => { sent.push(args[0]); },
+        onMessage: { addListener: () => {} },
+      },
+    };
+
+    const body = createNode('body');
+    const doc = createDocStub(body);
+    globalThis.document = doc;
+
+    const makeP = (text) => {
+      const p = createNode('p');
+      p.appendChild(createTextNode(text));
+      body.appendChild(p);
+      return p;
+    };
+
+    const p1 = makeP('第1关 密码 38');
+    const p2 = makeP('第2关 密码 52');
+    const p3 = makeP('第3关 密码 17');
+
+    startReader({ now: () => now, batchIntervalMs: 5000 });
+    const batchTimer = intervals.find((t) => t.ms === 5000);
+    assert.ok(batchTimer, '应注册 5000ms 批处理定时器');
+
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '初始 tick 不应发送');
+
+    // 整页倒序，数字顺序改变但模板相同
+    body.firstChild = p3;
+    p3.nextSibling = p2;
+    p2.nextSibling = p1;
+    p1.nextSibling = null;
+
+    now += 100;
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '仅调序不应发送');
+
+    // 再交换两行
+    body.firstChild = p2;
+    p2.nextSibling = p3;
+    p3.nextSibling = p1;
+    p1.nextSibling = null;
+
+    now += 100;
+    batchTimer.fn();
+    assert.strictEqual(sent.length, 0, '再次调序不应发送');
+  } finally {
+    stopReader();
+    globalThis.setInterval = originalSetInterval;
+    globalThis.clearInterval = originalClearInterval;
+    if (originalChrome === undefined) delete globalThis.chrome;
+    else globalThis.chrome = originalChrome;
+    if (originalDocument === undefined) delete globalThis.document;
+    else globalThis.document = originalDocument;
+  }
+});
